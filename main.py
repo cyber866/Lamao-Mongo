@@ -3,9 +3,9 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-from modules.leech import register_leech_handlers, cancel_task
+from modules.leech import register_leech_handlers
+from modules.utils import ensure_dirs, cancel_task
 from modules.cookies import register_cookie_handlers
-from modules.utils import ensure_dirs
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
@@ -32,7 +32,7 @@ def home_keyboard():
         ],
         [
             InlineKeyboardButton("📥 Leech/Mirror (send /leech <url>)", callback_data="noop"),
-            InlineKeyboardButton("⛔ Cancel process", callback_data="cancel_all")
+            InlineKeyboardButton("⛔ Cancel all processes", callback_data="cancel_all")
         ]
     ])
 
@@ -54,7 +54,7 @@ async def start_cmd(_, m: Message):
 
 @app.on_message(filters.command("cancel"))
 async def cancel_cmd(_, m: Message):
-    cancel_task()
+    cancel_task()  # Cancels all ongoing tasks
     await m.reply_text("⛔ All ongoing download processes have been cancelled.")
 
 @app.on_callback_query(filters.regex("^noop$"))
@@ -66,7 +66,7 @@ async def cancel_all_cb(_, cq):
     cancel_task()
     await cq.answer("⛔ All ongoing download processes cancelled.", show_alert=True)
 
-# register handlers
+# Register handlers from modules
 register_cookie_handlers(app)
 register_leech_handlers(app)
 
