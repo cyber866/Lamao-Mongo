@@ -1,3 +1,5 @@
 pyrogram
 pymongo
 yt-dlp
+dnspython
+tgcrypto
