@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Environment variables
+.env
+.env.*
+
+# Downloads and user data
+data/downloads/
+data/cookies/
+
+# Logs
+*.log
+
+# VSCode or other IDE files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Byte-compiled / cache
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore zip/archive files
+*.zip
