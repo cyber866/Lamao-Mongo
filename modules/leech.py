@@ -5,7 +5,7 @@ from .ytdlp import list_formats, download_media
 from .utils import (
     data_paths, ensure_dirs, register_task, cancel_task,
     cleanup_task, DownloadCancelled, safe_edit_text,
-    humanbytes, text_progress, should_update, tasks_col
+    humanbytes, text_progress, ACTIVE_TASKS
 )
 
 log = logging.getLogger("leech")
@@ -15,6 +15,7 @@ def cancel_btn(tid):
     return InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Cancel", callback_data=f"cancel:{tid}")]])
 
 def register_leech_handlers(app: Client):
+    
     @app.on_message(filters.command("leech"))
     async def cmd(_, m):
         args = m.text.split(maxsplit=1)
@@ -24,24 +25,23 @@ def register_leech_handlers(app: Client):
         user_id = m.from_user.id
         paths = data_paths(user_id)
         ensure_dirs()
-        msg = await m.reply("🔍 Fetching qualities…")
+        msg = await m.reply("🔍 Fetching available qualities…")
 
-        # Fetch all formats in executor to avoid blocking
+        # Fetch formats in executor
         fmts = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: list_formats(url, paths["cookies"], all_formats=True)
+            None, lambda: list_formats(url, paths["cookies"])
         )
-        if not fmts:
-            return await msg.edit("❌ No formats found.")
 
-        # Keep only unique resolutions with largest file size
-        fmt_dict = {}
+        # Filter only mp4/mkv/webm formats & remove duplicates by resolution
+        seen = set()
+        unique_fmts = []
         for f in fmts:
-            res = f.get('res') or 'N/A'
-            size = f.get('size') or 0
-            if res not in fmt_dict or size > fmt_dict[res]['size']:
-                fmt_dict[res] = f
-        fmts = list(fmt_dict.values())
+            if f["res"] in seen or not f["id"] or f["size"] == 0:
+                continue
+            seen.add(f["res"])
+            unique_fmts.append(f)
+        if not unique_fmts:
+            return await msg.edit("❌ No valid formats found.")
 
         tid = str(uuid.uuid4())[:8]
         LEECH_URLS[tid] = {"url": url, "user_id": user_id}
@@ -49,7 +49,7 @@ def register_leech_handlers(app: Client):
         # Build buttons
         kb = []
         row = []
-        for i, f in enumerate(fmts[:10], 1):
+        for i, f in enumerate(unique_fmts[:10], 1):
             size_text = humanbytes(f['size']) if f['size'] else "N/A"
             label = f"{f['res']} • {size_text}"
             row.append(InlineKeyboardButton(label, callback_data=f"choose:{tid}:{f['id']}"))
@@ -72,64 +72,53 @@ def register_leech_handlers(app: Client):
         user_id = task_info["user_id"]
         paths = data_paths(user_id)
 
-        st = await q.message.edit("⏳ Preparing download…", reply_markup=cancel_btn(0))
-        download_tid = st.id
-        await st.edit_reply_markup(cancel_btn(download_tid))
-        ev = register_task(download_tid)
+        st = await q.message.edit("⏳ Preparing download…", reply_markup=cancel_btn(tid))
+        ev = register_task(tid)
 
         async def updater(txt):
-            await safe_edit_text(st, f"{txt}\n\n`{url}`", reply_markup=cancel_btn(download_tid))
-            tasks_col.update_one({"task_id": download_tid}, {"$set": {"progress_text": txt}})
+            await safe_edit_text(st, f"{txt}\n\n`{url}`", reply_markup=cancel_btn(tid))
 
         def progress_hook(d):
             if d['status'] == 'downloading':
-                pct = d.get('_percent_str','').strip()
+                pct = d.get('_percent_str', '').strip()
                 pct = re.sub(r'\x1b\[[0-9;]*m', '', pct)
                 downloaded = d.get('downloaded_bytes', 0)
                 total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-                frac = float(pct.replace('%','')) if pct else 0
-                bar = text_progress(frac)
+                bar = text_progress(float(pct.replace('%','')) if pct else 0)
                 try:
-                    loop = asyncio.get_running_loop()
-                    asyncio.run_coroutine_threadsafe(
-                        updater(f"Downloading… {bar} {pct}\n⬆ {humanbytes(downloaded)}/{humanbytes(total)}"),
-                        loop
-                    )
+                    loop = asyncio.get_event_loop()
                 except RuntimeError:
-                    # Fallback for Colab or new threads
-                    asyncio.run(updater(f"Downloading… {bar} {pct}\n⬆ {humanbytes(downloaded)}/{humanbytes(total)}"))
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                loop.create_task(
+                    updater(f"⬇ Downloading… {bar} {pct}\n⬆ {humanbytes(downloaded)}/{humanbytes(total)}")
+                )
 
         async def runner():
             try:
-                # Download media in executor
                 fpath, fname = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: download_media(url, paths["downloads"], paths["cookies"], download_tid, progress_hook, fmt)
+                    lambda: download_media(url, paths["downloads"], paths["cookies"], tid, progress_hook, fmt)
                 )
-
                 async def up_cb(cur, tot):
-                    if should_update(download_tid):
-                        frac = cur/tot*100 if tot else 0
-                        bar = text_progress(frac)
-                        await updater(f"Uploading… {bar} {frac:.1f}%\n⬆ {humanbytes(cur)}/{humanbytes(tot)}")
-                    if ev.is_set():
-                        raise DownloadCancelled("Upload cancelled.")
+                    bar = text_progress(cur/tot*100 if tot else 0)
+                    await updater(f"⬆ Uploading… {bar}\n{humanbytes(cur)}/{humanbytes(tot)}")
+                    if ev.is_set(): raise DownloadCancelled("Upload cancelled.")
 
-                await q.message.reply_document(fpath, caption=f"✅ Leech complete: `{fname}`", progress=up_cb)
+                msg_file = await q.message.reply_document(fpath, caption=f"✅ Leech complete: `{fname}`", progress=up_cb)
                 await updater("✅ Done.")
-                tasks_col.update_one({"task_id": download_tid}, {"$set": {"status": "completed"}})
             except DownloadCancelled as e:
                 await st.edit(f"❌ Cancelled: {e}")
-                tasks_col.update_one({"task_id": download_tid}, {"$set": {"status": "cancelled"}})
             except Exception as e:
                 await st.edit(f"❌ Error: {e}")
-                tasks_col.update_one({"task_id": download_tid}, {"$set": {"status": "error", "error": str(e)}})
             finally:
-                cleanup_task(download_tid)
+                cleanup_task(tid)
 
-        asyncio.create_task(runner())
+        task = asyncio.create_task(runner())
+        ACTIVE_TASKS[tid]['task'] = task
 
-    @app.on_callback_query(filters.regex(r"^cancel:(\d+)$"))
+    @app.on_callback_query(filters.regex(r"^cancel:(.+)$"))
     async def cancel_cb(_, q):
-        cancel_task(int(q.data.split(":")[1]))
-        await q.answer("Cancelling…")
+        tid = q.data.split(":")[1]
+        cancel_task(tid)
+        await q.answer("⛔ Cancelling…", show_alert=True)
