@@ -1,82 +1,85 @@
 import os
-import uuid
 import asyncio
+import logging
 from pymongo import MongoClient
 
-# --- Directories ---
-BASE_DIR = os.path.join(os.getcwd(), "data")
-DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
-COOKIES_DIR = os.path.join(BASE_DIR, "cookies")
+log = logging.getLogger("utils")
 
-def ensure_dirs():
-    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-    os.makedirs(COOKIES_DIR, exist_ok=True)
-
-def data_paths(user_id=None):
-    """
-    Returns paths for downloads and cookies
-    """
-    return {
-        "downloads": DOWNLOADS_DIR,
-        "cookies": os.path.join(COOKIES_DIR, f"{user_id}.txt") if user_id else None
-    }
-
-# --- MongoDB setup ---
+# ---------------- MONGO SETUP ---------------- #
 MONGO_URI = os.environ.get("MONGO_URI")
 if not MONGO_URI:
-    raise SystemExit("Please set MONGO_URI in .env")
+    raise SystemExit("Please set MONGO_URI environment variable.")
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["mongo_leech_db"]
+client = MongoClient(MONGO_URI)
+db = client["mongo_leech"]
 
-# --- Collections ---
-cookies_col = db["cookies"]  # Store user cookies.txt info
-tasks_col = db["tasks"]      # Store ongoing download tasks
+cookies_col = db["cookies"]
+tasks_col = db["tasks"]
 
-# --- Task management ---
-ACTIVE_TASKS = {}
+# ---------------- PATHS ---------------- #
+def ensure_dirs():
+    paths = ["./data/downloads", "./data/cookies"]
+    for p in paths:
+        os.makedirs(p, exist_ok=True)
 
-def register_task(tid):
-    evt = asyncio.Event()
-    ACTIVE_TASKS[tid] = {"event": evt, "status": "running"}
-    return evt
+def data_paths(user_id: int):
+    return {
+        "downloads": f"./data/downloads/{user_id}",
+        "cookies": f"./data/cookies/{user_id}_cookies.txt"
+    }
 
-def cancel_task(tid=None):
-    if tid:
-        if tid in ACTIVE_TASKS:
-            ACTIVE_TASKS[tid]["event"].set()
-            ACTIVE_TASKS[tid]["status"] = "cancelled"
-    else:
-        for t in list(ACTIVE_TASKS.keys()):
-            ACTIVE_TASKS[t]["event"].set()
-            ACTIVE_TASKS[t]["status"] = "cancelled"
-
-def cleanup_task(tid):
-    if tid in ACTIVE_TASKS:
-        del ACTIVE_TASKS[tid]
-
-def should_update(tid):
-    return tid in ACTIVE_TASKS and not ACTIVE_TASKS[tid]["event"].is_set()
-
-class DownloadCancelled(Exception):
-    pass
-
-def humanbytes(size):
-    # Converts bytes to human-readable
+# ---------------- HUMAN READABLE SIZE ---------------- #
+def humanbytes(size: int) -> str:
+    if not size:
+        return "N/A"
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if size < 1024:
             return f"{size:.2f}{unit}"
         size /= 1024
     return f"{size:.2f}PB"
 
-def text_progress(percent):
-    # Returns a textual progress bar
-    done = int(percent / 10)
-    remain = 10 - done
-    return f"[{'█'*done}{'░'*remain}] {percent:.1f}%"
+# ---------------- TEXT PROGRESS BAR ---------------- #
+def text_progress(percentage: float, length: int = 20) -> str:
+    """
+    Returns a simple text progress bar for the given percentage.
+    """
+    filled_len = int(length * percentage / 100)
+    bar = "█" * filled_len + "░" * (length - filled_len)
+    return f"[{bar}] {percentage:.1f}%"
 
-async def safe_edit_text(msg, text, reply_markup=None):
+# ---------------- TASK MANAGEMENT ---------------- #
+ACTIVE_TASKS = {}
+
+class DownloadCancelled(Exception):
+    pass
+
+def register_task(task_id: int):
+    event = asyncio.Event()
+    ACTIVE_TASKS[task_id] = {"event": event, "task": None}
+    return event
+
+def cancel_task(task_id: int = None):
+    if task_id:
+        t = ACTIVE_TASKS.get(task_id)
+        if t:
+            t["event"].set()
+    else:
+        for t in ACTIVE_TASKS.values():
+            t["event"].set()
+
+def cleanup_task(task_id: int):
+    if task_id in ACTIVE_TASKS:
+        del ACTIVE_TASKS[task_id]
+
+def should_update(task_id: int) -> bool:
+    t = ACTIVE_TASKS.get(task_id)
+    if not t:
+        return False
+    return not t["event"].is_set()
+
+# ---------------- SAFE EDIT ---------------- #
+async def safe_edit_text(msg, text: str, reply_markup=None):
     try:
-        await msg.edit_text(text, reply_markup=reply_markup)
+        await msg.edit(text, reply_markup=reply_markup)
     except Exception:
         pass
