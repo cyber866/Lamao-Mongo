@@ -1,9 +1,9 @@
 
----
+
 
 ## **main.py (patched)**
 
-```python
+
 import os
 import logging
 from pyrogram import Client, filters
