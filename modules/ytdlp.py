@@ -1,6 +1,6 @@
 import yt_dlp
 
-def list_formats(url, cookies=None, all_formats=False):
+def list_formats(url, cookies=None):
     opts = {
         "quiet": True,
         "skip_download": True,
@@ -8,15 +8,18 @@ def list_formats(url, cookies=None, all_formats=False):
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
-        fmts = info.get("formats", []) if all_formats else [f for f in info.get("formats", []) if f.get("format_id")]
-        result = []
+        fmts = info.get("formats", [])
+        # Keep only unique resolutions with largest file size
+        seen = {}
         for f in fmts:
-            result.append({
-                "id": f.get("format_id"),
-                "res": f.get("format_note") or f.get("resolution") or f.get("height"),
-                "size": f.get("filesize") or f.get("filesize_approx") or 0
-            })
-        return result
+            res = f.get("format_note") or f.get("height") or "N/A"
+            size = f.get("filesize") or f.get("filesize_approx") or 0
+            if res in seen:
+                if size > seen[res]['size']:
+                    seen[res] = {"id": f["format_id"], "res": res, "size": size}
+            else:
+                seen[res] = {"id": f["format_id"], "res": res, "size": size}
+        return list(seen.values())
 
 def download_media(url, path, cookies, tid, progress_hook, fmt_id):
     opts = {
