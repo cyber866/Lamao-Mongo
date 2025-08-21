@@ -2,6 +2,7 @@ import os
 import uuid
 import logging
 import asyncio
+import time
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -31,6 +32,7 @@ def register_leech_handlers(app: Client):
 
         msg = await m.reply("🔍 Fetching formats…")
 
+        # Fetch formats in thread
         try:
             fmts = await asyncio.to_thread(list_formats, url, paths["cookies"])
         except Exception as e:
@@ -39,7 +41,7 @@ def register_leech_handlers(app: Client):
         if not fmts:
             return await msg.edit("❌ No formats found.")
 
-        # Filter video/audio with valid size
+        # Filter only video/audio with valid filesize
         unique_fmts = {}
         for f in fmts:
             try:
@@ -51,14 +53,13 @@ def register_leech_handlers(app: Client):
                 continue
 
         fmts = sorted(unique_fmts.values(), key=lambda x: int(x.get("res") or 0), reverse=True)
-
         if not fmts:
             return await msg.edit("❌ No valid video/audio formats found.")
 
         tid = str(uuid.uuid4())[:8]
         ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "msg_id": msg.id}
 
-        # Create buttons
+        # Create buttons for top 10 formats
         kb = []
         row = []
         for i, f in enumerate(fmts[:10], 1):
@@ -85,39 +86,48 @@ def register_leech_handlers(app: Client):
         paths = data_paths(user_id)
 
         st = await q.message.edit("⏳ Preparing download…", reply_markup=cancel_btn(tid))
+        main_loop = asyncio.get_running_loop()
+        last_download_update = 0
+        last_upload_update = 0
 
         async def updater(txt):
-            # Safe edit every 1 sec to avoid Telegram rate-limit
             await safe_edit_text(st, f"{txt}\n\n`{url}`", reply_markup=cancel_btn(tid))
 
-        last_update = 0
-
         def progress_hook(d):
-            nonlocal last_update
+            nonlocal last_download_update
             if d["status"] == "downloading":
-                pct_str = d.get("_percent_str", "0").strip().replace("%", "")
+                now = time.time()
+                if now - last_download_update < 5:  # update every 5 seconds
+                    return
+                last_download_update = now
+
+                pct = d.get("_percent_str", "").strip().replace("%", "")
+                downloaded = d.get("downloaded_bytes", 0)
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 try:
-                    pct_float = float(pct_str)
+                    pct_float = float(pct)
                 except:
                     pct_float = 0
-                now = asyncio.get_event_loop().time()
-                # Update only every 1 second
-                if now - last_update > 1:
-                    last_update = now
-                    downloaded = d.get("downloaded_bytes", 0)
-                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                    bar = "█" * int(pct_float // 5) + "░" * (20 - int(pct_float // 5))
-                    asyncio.get_event_loop().create_task(
-                        updater(f"Downloading… {bar} {pct_float:.1f}%\n⬆ {humanbytes(downloaded)}/{humanbytes(total)}")
-                    )
+                bar = "█" * int(pct_float // 5) + "░" * (20 - int(pct_float // 5))
+
+                main_loop.call_soon_threadsafe(
+                    asyncio.create_task,
+                    updater(f"Downloading… {bar} {pct_float:.1f}%\n⬆ {humanbytes(downloaded)}/{humanbytes(total)}")
+                )
 
         async def runner():
+            nonlocal last_upload_update
             try:
                 fpath, fname = await asyncio.to_thread(
                     download_media, url, paths["downloads"], paths["cookies"], progress_hook, fmt
                 )
 
                 async def upload_progress(cur, tot):
+                    nonlocal last_upload_update
+                    now = time.time()
+                    if now - last_upload_update < 5:
+                        return
+                    last_upload_update = now
                     frac = cur / tot * 100 if tot else 0
                     bar = "█" * int(frac // 5) + "░" * (20 - int(frac // 5))
                     await updater(f"Uploading… {bar} {frac:.1f}%\n⬆ {humanbytes(cur)}/{humanbytes(tot)}")
