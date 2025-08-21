@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -17,23 +18,21 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise SystemExit("Please set API_ID, API_HASH, BOT_TOKEN environment variables.")
 
+# Use memory session for Colab to avoid database locks
 app = Client(
     "colab_leech_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
+    session_type="memory"
 )
 
 def home_keyboard():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("➕ Add cookies.txt", callback_data="cookies:add"),
-            InlineKeyboardButton("🗑 Remove cookies.txt", callback_data="cookies:remove")
-        ],
-        [
-            InlineKeyboardButton("📥 Leech/Mirror (send /leech <url>)", callback_data="noop"),
-            InlineKeyboardButton("⛔ Cancel process", callback_data="cancel_all")
-        ]
+        [InlineKeyboardButton("➕ Add cookies.txt", callback_data="cookies:add"),
+         InlineKeyboardButton("🗑 Remove cookies.txt", callback_data="cookies:remove")],
+        [InlineKeyboardButton("📥 Leech/Mirror (send /leech <url>)", callback_data="noop"),
+         InlineKeyboardButton("⛔ Cancel all", callback_data="cancel_all")]
     ])
 
 @app.on_message(filters.command("start"))
@@ -42,20 +41,20 @@ async def start_cmd(_, m: Message):
     await m.reply_text(
         "👋 **Welcome to Colab Leech Bot**\n\n"
         "✅ Features:\n"
-        "   • Quality selection\n"
+        "   • Maximum quality selection\n"
+        "   • File size display\n"
         "   • Progress bar\n"
         "   • Cookies management\n"
         "   • Cancel ongoing downloads\n"
-        "▶ Usage: `/leech <url>`\n"
-        "Use the buttons below to manage cookies or cancel downloads.",
+        "▶ Usage: `/leech <url>`",
         reply_markup=home_keyboard(),
         disable_web_page_preview=True
     )
 
 @app.on_message(filters.command("cancel"))
 async def cancel_cmd(_, m: Message):
-    cancel_task()  # Cancels all ongoing tasks
-    await m.reply_text("⛔ All ongoing download processes have been cancelled.")
+    cancel_task()
+    await m.reply_text("⛔ All ongoing downloads have been cancelled.")
 
 @app.on_callback_query(filters.regex("^noop$"))
 async def ignore_noop(_, cq):
@@ -66,11 +65,13 @@ async def cancel_all_cb(_, cq):
     cancel_task()
     await cq.answer("⛔ All ongoing download processes cancelled.", show_alert=True)
 
-# Register handlers from modules
+# Register handlers
 register_cookie_handlers(app)
 register_leech_handlers(app)
 
 if __name__ == "__main__":
     ensure_dirs()
     log.info("Starting bot…")
-    app.run()
+    asyncio.run(app.start())  # Start bot safely in Colab
+    log.info("Bot is running...")
+    asyncio.get_event_loop().run_forever()
