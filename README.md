@@ -51,24 +51,17 @@ print(f"Upload Speed: {upload_speed_MB:.2f} MB/s")
 
 ## Installation
 
-1. Clone the repo:
+To run this code in google colab , add this code :
+1 st Code Block is 
 ```bash
-[git clone https://github.com/<username>/colab_leech_bot.git
-cd colab_leech_bot](https://github.com/priyatrantik-cyber/mongo-leech.git)
-
-
-
-#to run this project in google colab
-
-#add this codes in colab
-
-
-
 !git clone https://github.com/priyatrantik-cyber/mongo-leech.git
 %cd mongo-leech
+!pip install -r requirements.txt
+```
+2nd code block -
 
-!pip install pyrogram tgcrypto yt-dlp pymongo dnspython
-
+enter correct details then run the code :
+```bash
 import os
 
 os.environ["API_ID"] = "Enter_your_API_ID_Here"
@@ -77,8 +70,10 @@ os.environ["BOT_TOKEN"] = ""
 os.environ["MONGO_URI"] = "mongodb+srv://kille"
 os.makedirs("data/downloads", exist_ok=True)
 os.makedirs("data/cookies", exist_ok=True)
-
+```
+finally 3rd main code block to run the bot
+```bash
 !python main.py
-
+```
 
 
