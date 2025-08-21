@@ -30,5 +30,41 @@ A Telegram bot to **download, leech, and mirror media from almost any website**,
 
 1. Clone the repo:
 ```bash
-git clone https://github.com/<username>/colab_leech_bot.git
-cd colab_leech_bot
+[git clone https://github.com/<username>/colab_leech_bot.git
+cd colab_leech_bot](https://github.com/priyatrantik-cyber/mongo-leech.git)
+
+
+
+to run this project in google colab
+
+add this codes in colab
+
+1
+
+!git clone https://github.com/priyatrantik-cyber/mongo-leech.git
+%cd mongo-leech
+
+2
+
+!pip install pyrogram tgcrypto yt-dlp pymongo dnspython
+
+3
+
+import os
+
+os.environ["API_ID"] = ""
+os.environ["API_HASH"] = ""
+os.environ["BOT_TOKEN"] = ""
+os.environ["MONGO_URI"] = "mongodb+srv://kille"
+os.makedirs("data/downloads", exist_ok=True)
+os.makedirs("data/cookies", exist_ok=True)
+
+4
+
+!python main.py
+
+5 optional for run this project in background
+
+!nohup python main.py &
+
+
