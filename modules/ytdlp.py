@@ -1,4 +1,6 @@
 import yt_dlp
+import re
+import os
 
 def list_formats(url, cookies=None):
     opts = {
@@ -9,20 +11,31 @@ def list_formats(url, cookies=None):
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         fmts = info.get("formats", [])
-        unique = {}
+        result = []
         for f in fmts:
-            fid = f.get("format_id")
-            if fid not in unique and f.get("vcodec") != "none":
-                unique[fid] = {
-                    "id": fid,
-                    "res": f.get("format_note") or str(f.get("height"))+"p",
-                    "size": f.get("filesize") or f.get("filesize_approx") or 0
-                }
-        return list(unique.values())
+            if not f.get("format_id") or f.get("acodec") == "none" and f.get("vcodec") == "none":
+                continue
+            try:
+                res = f.get("height") or 0
+            except:
+                res = 0
+            result.append({
+                "id": f.get("format_id"),
+                "res": res,
+                "size": f.get("filesize") or f.get("filesize_approx") or 0,
+                "ext": f.get("ext")
+            })
+        # Remove duplicates based on resolution and prefer largest size
+        unique = {}
+        for f in result:
+            r = f['res']
+            if r not in unique or f['size'] > unique[r]['size']:
+                unique[r] = f
+        return sorted(unique.values(), key=lambda x: x['res'], reverse=True)
 
-def download_media(url, path, cookies, tid, progress_hook, fmt_id):
+def download_media(url, path, cookies, progress_hook, fmt_id):
     opts = {
-        "outtmpl": f"{path}/%(title)s.%(ext)s",
+        "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
         "cookiefile": cookies if cookies else None,
         "progress_hooks": [progress_hook],
         "format": fmt_id
