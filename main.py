@@ -3,7 +3,7 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-from modules.leech import register_leech_handlers
+from modules.leech import register_leech_handlers, ACTIVE_TASKS
 from modules.utils import ensure_dirs, cancel_task
 from modules.cookies import register_cookie_handlers
 
@@ -25,6 +25,7 @@ app = Client(
 )
 
 def home_keyboard():
+    tasks_count = len(ACTIVE_TASKS)
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("➕ Add cookies.txt", callback_data="cookies:add"),
@@ -32,7 +33,7 @@ def home_keyboard():
         ],
         [
             InlineKeyboardButton("📥 Leech/Mirror (send /leech <url>)", callback_data="noop"),
-            InlineKeyboardButton("⛔ Cancel all processes", callback_data="cancel_all")
+            InlineKeyboardButton(f"⛔ Cancel all ({tasks_count})", callback_data="cancel_all")
         ]
     ])
 
@@ -43,7 +44,7 @@ async def start_cmd(_, m: Message):
         "👋 **Welcome to Colab Leech Bot**\n\n"
         "✅ Features:\n"
         "   • Quality selection\n"
-        "   • Progress bar\n"
+        "   • Download & upload progress bars\n"
         "   • Cookies management\n"
         "   • Cancel ongoing downloads\n"
         "▶ Usage: `/leech <url>`\n"
@@ -54,19 +55,27 @@ async def start_cmd(_, m: Message):
 
 @app.on_message(filters.command("cancel"))
 async def cancel_cmd(_, m: Message):
-    cancel_task()  # Cancels all ongoing tasks
+    cancel_task(ACTIVE_TASKS)
     await m.reply_text("⛔ All ongoing download processes have been cancelled.")
 
 @app.on_callback_query(filters.regex("^noop$"))
 async def ignore_noop(_, cq):
-    await cq.answer("Use /leech <url> to start.", show_alert=False)
+    await cq.answer("Use /leech <url> to start a download.", show_alert=True)
 
 @app.on_callback_query(filters.regex("^cancel_all$"))
 async def cancel_all_cb(_, cq):
-    cancel_task()
-    await cq.answer("⛔ All ongoing download processes cancelled.", show_alert=True)
+    cancel_task(ACTIVE_TASKS)
+    await cq.answer(f"⛔ All ongoing download processes cancelled.", show_alert=True)
 
-# Register handlers from modules
+@app.on_callback_query(filters.regex(r"^cookies:(add|remove)$"))
+async def cookies_cb(_, cq):
+    action = cq.data.split(":")[1]
+    if action == "add":
+        await cq.answer("Send cookies.txt file to add.", show_alert=True)
+    elif action == "remove":
+        await cq.answer("Cookies removed.", show_alert=True)
+
+# Register handlers
 register_cookie_handlers(app)
 register_leech_handlers(app)
 
