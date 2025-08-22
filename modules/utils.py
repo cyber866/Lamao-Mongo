@@ -1,85 +1,66 @@
+# modules/utils.py
+
 import os
-import asyncio
-import logging
+import math
 from pymongo import MongoClient
 
-log = logging.getLogger("utils")
+# ------------------ MongoDB cookies collection ------------------
+MONGO_URI = os.environ.get("MONGO_URI", "")
+if MONGO_URI:
+    client = MongoClient(MONGO_URI)
+    cookies_col = client["mongo_leech"]["cookies"]
+else:
+    cookies_col = None  # In case MongoDB URI is not set
 
-# ---------------- MONGO SETUP ---------------- #
-MONGO_URI = os.environ.get("MONGO_URI")
-if not MONGO_URI:
-    raise SystemExit("Please set MONGO_URI environment variable.")
-
-client = MongoClient(MONGO_URI)
-db = client["mongo_leech"]
-
-cookies_col = db["cookies"]
-tasks_col = db["tasks"]
-
-# ---------------- PATHS ---------------- #
-def ensure_dirs():
-    paths = ["./data/downloads", "./data/cookies"]
-    for p in paths:
-        os.makedirs(p, exist_ok=True)
-
-def data_paths(user_id: int):
-    return {
-        "downloads": f"./data/downloads/{user_id}",
-        "cookies": f"./data/cookies/{user_id}_cookies.txt"
-    }
-
-# ---------------- HUMAN READABLE SIZE ---------------- #
-def humanbytes(size: int) -> str:
-    if not size:
-        return "N/A"
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size < 1024:
-            return f"{size:.2f}{unit}"
-        size /= 1024
-    return f"{size:.2f}PB"
-
-# ---------------- TEXT PROGRESS BAR ---------------- #
-def text_progress(percentage: float, length: int = 20) -> str:
-    """
-    Returns a simple text progress bar for the given percentage.
-    """
-    filled_len = int(length * percentage / 100)
-    bar = "█" * filled_len + "░" * (length - filled_len)
-    return f"[{bar}] {percentage:.1f}%"
-
-# ---------------- TASK MANAGEMENT ---------------- #
-ACTIVE_TASKS = {}
-
+# ------------------ Exception ------------------
 class DownloadCancelled(Exception):
+    """Raised when a download or upload is cancelled"""
     pass
 
-def register_task(task_id: int):
-    event = asyncio.Event()
-    ACTIVE_TASKS[task_id] = {"event": event, "task": None}
-    return event
+# ------------------ Directory helpers ------------------
+BASE_DIR = os.path.join(os.getcwd(), "data")
+DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
+COOKIES_DIR = os.path.join(BASE_DIR, "cookies")
 
-def cancel_task(task_id: int = None):
-    if task_id:
-        t = ACTIVE_TASKS.get(task_id)
-        if t:
-            t["event"].set()
-    else:
-        for t in ACTIVE_TASKS.values():
-            t["event"].set()
+def ensure_dirs():
+    """Ensure required directories exist"""
+    for d in [BASE_DIR, DOWNLOADS_DIR, COOKIES_DIR]:
+        os.makedirs(d, exist_ok=True)
 
-def cleanup_task(task_id: int):
-    if task_id in ACTIVE_TASKS:
-        del ACTIVE_TASKS[task_id]
+def data_paths(user_id):
+    """Return user-specific paths"""
+    user_dir = os.path.join(DOWNLOADS_DIR, str(user_id))
+    os.makedirs(user_dir, exist_ok=True)
+    return {
+        "downloads": user_dir,
+        "cookies": os.path.join(COOKIES_DIR, f"{user_id}_cookies.txt")
+    }
 
-def should_update(task_id: int) -> bool:
-    t = ACTIVE_TASKS.get(task_id)
-    if not t:
-        return False
-    return not t["event"].is_set()
+# ------------------ Helpers ------------------
+def humanbytes(size):
+    """Convert bytes to human-readable format"""
+    if not size:
+        return "0B"
+    power = 2**10
+    n = 0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    while size >= power and n < len(units)-1:
+        size /= power
+        n += 1
+    return f"{size:.2f}{units[n]}"
 
-# ---------------- SAFE EDIT ---------------- #
-async def safe_edit_text(msg, text: str, reply_markup=None):
+async def safe_edit_text(msg, text, reply_markup=None):
+    """Safely edit a Telegram message"""
     try:
         await msg.edit(text, reply_markup=reply_markup)
     except Exception:
         pass
+
+# ------------------ Cancel tasks ------------------
+def cancel_task(active_tasks):
+    """
+    Cancels all ongoing download/upload tasks.
+    Sets 'cancel' flag for each active task.
+    """
+    for tid in list(active_tasks.keys()):
+        active_tasks[tid]["cancel"] = True
