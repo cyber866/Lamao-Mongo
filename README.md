@@ -13,7 +13,7 @@ A Telegram bot to **download, leech, and mirror media from almost any website**,
 - Tracks tasks in **MongoDB** (optional but recommended).
 - Safe progress updates, avoids Pyrogram coroutine errors.
 - Fully deployable on **Colab, VPS, or any server**.
-
+- File Splits if bigger then 1900 MB or 1.86 GB
 ---
 
 ## Commands
