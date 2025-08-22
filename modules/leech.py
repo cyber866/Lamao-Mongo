@@ -3,6 +3,7 @@ import uuid
 import logging
 import asyncio
 import time
+import re
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -10,12 +11,15 @@ from .ytdlp import list_formats, download_media
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
 
 log = logging.getLogger("leech")
-
-# Active tasks storage
 ACTIVE_TASKS = {}
 
 def cancel_btn(tid):
     return InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Cancel", callback_data=f"cancel:{tid}")]])
+
+def sanitize_filename(name):
+    """Remove characters Telegram cannot handle"""
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+    return name.strip()
 
 def register_leech_handlers(app: Client):
 
@@ -32,7 +36,6 @@ def register_leech_handlers(app: Client):
 
         msg = await m.reply("🔍 Fetching formats…")
 
-        # Fetch formats in thread
         try:
             fmts = await asyncio.to_thread(list_formats, url, paths["cookies"])
         except Exception as e:
@@ -41,7 +44,6 @@ def register_leech_handlers(app: Client):
         if not fmts:
             return await msg.edit("❌ No formats found.")
 
-        # Filter only video/audio with valid filesize
         unique_fmts = {}
         for f in fmts:
             try:
@@ -57,9 +59,8 @@ def register_leech_handlers(app: Client):
             return await msg.edit("❌ No valid video/audio formats found.")
 
         tid = str(uuid.uuid4())[:8]
-        ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "msg_id": msg.id}
+        ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "msg_id": msg.id, "cancel": False}
 
-        # Create buttons for top 10 formats
         kb = []
         row = []
         for i, f in enumerate(fmts[:10], 1):
@@ -97,7 +98,7 @@ def register_leech_handlers(app: Client):
             nonlocal last_download_update
             if d["status"] == "downloading":
                 now = time.time()
-                if now - last_download_update < 5:  # update every 5 seconds
+                if now - last_download_update < 5:
                     return
                 last_download_update = now
 
@@ -118,24 +119,44 @@ def register_leech_handlers(app: Client):
         async def runner():
             nonlocal last_upload_update
             try:
-                fpath, fname = await asyncio.to_thread(
+                fpaths, fname = await asyncio.to_thread(
                     download_media, url, paths["downloads"], paths["cookies"], progress_hook, fmt
                 )
 
-                async def upload_progress(cur, tot):
-                    nonlocal last_upload_update
-                    now = time.time()
-                    if now - last_upload_update < 5:
+                total_parts = len(fpaths)
+                for idx, fpath in enumerate(fpaths, 1):
+                    if ACTIVE_TASKS.get(tid, {}).get("cancel"):
+                        await st.edit("❌ Upload cancelled by user.")
                         return
-                    last_upload_update = now
-                    frac = cur / tot * 100 if tot else 0
-                    bar = "█" * int(frac // 5) + "░" * (20 - int(frac // 5))
-                    await updater(f"Uploading… {bar} {frac:.1f}%\n⬆ {humanbytes(cur)}/{humanbytes(tot)}")
 
-                await q.message.reply_document(fpath, caption=f"✅ Leech complete: `{fname}`", progress=upload_progress)
-                await updater("✅ Done.")
+                    if not os.path.exists(fpath):
+                        await st.edit(f"❌ File not found: {fpath}")
+                        continue
+
+                    part_name = sanitize_filename(os.path.basename(fpath))
+                    if len(part_name) > 150:
+                        ext = os.path.splitext(part_name)[1]
+                        part_name = part_name[:150] + ext
+
+                    async def upload_progress(cur, tot):
+                        nonlocal last_upload_update
+                        now = time.time()
+                        if now - last_upload_update < 2:
+                            return
+                        last_upload_update = now
+                        frac = cur / tot * 100 if tot else 0
+                        bar = "█" * int(frac // 5) + "░" * (20 - int(frac // 5))
+                        await updater(f"Uploading part {idx}/{total_parts}… {bar} {frac:.1f}%\n⬆ {humanbytes(cur)}/{humanbytes(tot)}")
+
+                        if ACTIVE_TASKS.get(tid, {}).get("cancel"):
+                            raise DownloadCancelled()
+
+                    await q.message.reply_document(fpath, caption=f"✅ Uploaded part {idx}/{total_parts}: `{part_name}`", progress=upload_progress)
+
+                await updater("✅ All parts uploaded successfully!")
+
             except DownloadCancelled:
-                await st.edit("❌ Download cancelled.")
+                await st.edit("❌ Download/Upload cancelled.")
             except Exception as e:
                 await st.edit(f"❌ Error: {e}")
             finally:
@@ -147,7 +168,7 @@ def register_leech_handlers(app: Client):
     async def cancel_cb(_, q):
         tid = q.data.split(":")[1]
         if tid in ACTIVE_TASKS:
-            ACTIVE_TASKS.pop(tid)
+            ACTIVE_TASKS[tid]["cancel"] = True
             await q.answer("⛔ Task cancelled.", show_alert=True)
         else:
             await q.answer("❌ Task not found.", show_alert=True)
