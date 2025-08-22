@@ -2,14 +2,8 @@ import os
 
 def split_file(file_path, part_size=1.9 * 1024 * 1024 * 1024):
     """
-    Splits a large file into smaller chunks.
-
-    Args:
-        file_path (str): Path to the original file.
-        part_size (int): Size of each chunk in bytes (default ~1.9GB for Telegram).
-
-    Returns:
-        list: List of chunk file paths.
+    Splits a large file into smaller chunks (~1.9GB each for Telegram).
+    Returns list of part file paths.
     """
     file_size = os.path.getsize(file_path)
     parts = []
