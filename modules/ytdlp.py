@@ -1,72 +1,74 @@
-import yt_dlp
 import os
+import asyncio
+import yt_dlp
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
-# ---------------- Telegram-safe split size ----------------
-MAX_SIZE = 1900 * 1024 * 1024  # 1900 MiB ≈ 1.86 GiB
-
-def list_formats(url, cookies=None):
-    """List available formats for a URL"""
-    opts = {
-        "quiet": True,
-        "skip_download": True,
-        "cookiefile": cookies if cookies else None
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        fmts = info.get("formats", [])
-        result = []
-        for f in fmts:
-            if not f.get("format_id") or (f.get("acodec") == "none" and f.get("vcodec") == "none"):
-                continue
-            res = f.get("height") or 0
-            result.append({
-                "id": f.get("format_id"),
-                "res": res,
-                "size": f.get("filesize") or f.get("filesize_approx") or 0,
-                "ext": f.get("ext")
-            })
-        # Remove duplicates based on resolution and keep largest size
-        unique = {}
-        for f in result:
-            r = f['res']
-            if r not in unique or f['size'] > unique[r]['size']:
-                unique[r] = f
-        return sorted(unique.values(), key=lambda x: x['res'], reverse=True)
+from .utils import get_cancel_button, is_cancelled, set_cancel_flag, run_with_cancel
+from .file_spliter import split_file
 
 
-def download_media(url, path, cookies, progress_hook, fmt_id):
-    """Download media and split into Telegram-safe chunks if needed"""
-    opts = {
-        "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
-        "cookiefile": cookies if cookies else None,
-        "progress_hooks": [progress_hook],
-        "format": fmt_id
-    }
+# ------------------------- /ytdlp command -------------------------
+@Client.on_message(filters.command("ytdlp") & filters.private)
+async def ytdlp_handler(client: Client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply_text("⚠️ Usage: `/ytdlp <url>`", quote=True)
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        full_path = ydl.prepare_filename(info)
-        filesize = os.path.getsize(full_path)
+    url = message.command[1]
+    chat_id = message.chat.id
+    task_id = f"ytdlp_{message.id}"
 
-        # If file is smaller than MAX_SIZE, return as single file
-        if filesize <= MAX_SIZE:
-            return [full_path], info.get("title")
+    status = await message.reply_text(
+        f"🎥 Processing video:\n`{url}`",
+        reply_markup=get_cancel_button(task_id),
+        quote=True,
+    )
 
-        # Split large file into multiple chunks
-        part_paths = []
-        with open(full_path, "rb") as f:
-            idx = 1
-            while True:
-                chunk = f.read(MAX_SIZE)
-                if not chunk:
-                    break
-                base, ext = os.path.splitext(full_path)
-                part_file = f"{base}.part{idx}{ext}"
-                with open(part_file, "wb") as pf:
-                    pf.write(chunk)
-                part_paths.append(part_file)
-                idx += 1
+    async def process():
+        try:
+            ydl_opts = {
+                "outtmpl": "downloads/%(title)s.%(ext)s",
+                "quiet": True,
+                "format": "best[ext=mp4]/best",
+                "progress_hooks": [lambda d: asyncio.create_task(update_status(d))],
+            }
 
-        # Remove original large file
-        os.remove(full_path)
-        return part_paths, info.get("title")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
+
+            if is_cancelled(chat_id, task_id):
+                return await status.edit_text("🚫 Task cancelled before upload.")
+
+            # If file is large → split
+            if os.path.getsize(file_path) > 1900 * 1024 * 1024:  # ~1.9 GB
+                parts = split_file(file_path)
+                for part in parts:
+                    if is_cancelled(chat_id, task_id):
+                        return await status.edit_text("🚫 Task cancelled during upload.")
+                    await client.send_video(chat_id, part)
+                    os.remove(part)
+            else:
+                await client.send_video(chat_id, file_path)
+
+            await status.edit_text("✅ Video upload completed!")
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+        except Exception as e:
+            await status.edit_text(f"❌ Error: `{e}`")
+
+    async def update_status(d):
+        if d["status"] == "downloading":
+            text = f"⬇️ Downloading video: {d.get('filename','')}\n" \
+                   f"Progress: {d.get('_percent_str','')}, " \
+                   f"Speed: {d.get('_speed_str','')}"
+            try:
+                await status.edit_text(text, reply_markup=get_cancel_button(task_id))
+            except:
+                pass
+
+    # Register for cancel + run
+    set_cancel_flag(chat_id, task_id)
+    await run_with_cancel(process(), chat_id, task_id, status)
