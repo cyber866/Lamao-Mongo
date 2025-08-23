@@ -3,3 +3,4 @@ pymongo
 yt-dlp
 dnspython
 tgcrypto
+requests
