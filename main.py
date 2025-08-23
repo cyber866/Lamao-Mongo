@@ -1,85 +1,67 @@
-import os
 import logging
+import os
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-
-from modules.leech import register_leech_handlers, ACTIVE_TASKS
-from modules.utils import ensure_dirs, cancel_task
-from modules.cookies import register_cookie_handlers
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from modules.leech import register_leech_handlers, ACTIVE_TASKS, cancel_task
+from modules.ytdlp import register_ytdlp_handlers
+from modules.cookies import add_cookies, remove_cookies, cookies_status
+from modules.utils import start_cleanup
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("main")
 
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+# ---------------- CONFIG ----------------
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH"))
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise SystemExit("Please set API_ID, API_HASH, BOT_TOKEN environment variables.")
+app = Client("mongo-leech", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-app = Client(
-    "colab_leech_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-)
-
-def home_keyboard():
-    tasks_count = len(ACTIVE_TASKS)
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("➕ Add cookies.txt", callback_data="cookies:add"),
-            InlineKeyboardButton("🗑 Remove cookies.txt", callback_data="cookies:remove")
-        ],
-        [
-            InlineKeyboardButton("📥 Leech/Mirror (send /leech <url>)", callback_data="noop"),
-            InlineKeyboardButton(f"⛔ Cancel all ({tasks_count})", callback_data="cancel_all")
-        ]
-    ])
-
+# ---------------- START ----------------
 @app.on_message(filters.command("start"))
-async def start_cmd(_, m: Message):
-    ensure_dirs()
-    await m.reply_text(
-        "👋 **Welcome to Colab Leech Bot**\n\n"
-        "✅ Features:\n"
-        "   • Quality selection\n"
-        "   • Download & upload progress bars\n"
-        "   • Cookies management\n"
-        "   • Cancel ongoing downloads\n"
-        "▶ Usage: `/leech <url>`\n"
-        "Use the buttons below to manage cookies or cancel downloads.",
-        reply_markup=home_keyboard(),
-        disable_web_page_preview=True
+async def start_cmd(_, message):
+    await message.reply_text(
+        "👋 Welcome to Mongo-Leech Bot!\n\n"
+        "Use /leech <link> for general files 📁\n"
+        "Use /ytdlp <link> for streamable videos 🎥\n\n"
+        "You can also /cancel any running task ❌"
     )
 
+# ---------------- CANCEL ----------------
 @app.on_message(filters.command("cancel"))
-async def cancel_cmd(_, m: Message):
-    cancel_task(ACTIVE_TASKS)
-    await m.reply_text("⛔ All ongoing download processes have been cancelled.")
+async def cancel_cmd(_, message):
+    chat_id = message.chat.id
+    if chat_id in ACTIVE_TASKS and ACTIVE_TASKS[chat_id]:
+        task = ACTIVE_TASKS[chat_id]
+        cancel_task(chat_id)
+        await message.reply_text("✅ Current task has been cancelled successfully.")
+    else:
+        await message.reply_text("⚠️ No active task to cancel.")
 
-@app.on_callback_query(filters.regex("^noop$"))
-async def ignore_noop(_, cq):
-    await cq.answer("Use /leech <url> to start a download.", show_alert=True)
+# ---------------- COOKIES ----------------
+@app.on_message(filters.command("addcookies"))
+async def add_cookies_cmd(_, message):
+    if not message.reply_to_message or not message.reply_to_message.document:
+        return await message.reply_text("⚠️ Please reply to a cookies.txt file.")
+    await add_cookies(message)
 
-@app.on_callback_query(filters.regex("^cancel_all$"))
-async def cancel_all_cb(_, cq):
-    cancel_task(ACTIVE_TASKS)
-    await cq.answer(f"⛔ All ongoing download processes cancelled.", show_alert=True)
+@app.on_message(filters.command("removecookies"))
+async def remove_cookies_cmd(_, message):
+    await remove_cookies(message)
 
-@app.on_callback_query(filters.regex(r"^cookies:(add|remove)$"))
-async def cookies_cb(_, cq):
-    action = cq.data.split(":")[1]
-    if action == "add":
-        await cq.answer("Send cookies.txt file to add.", show_alert=True)
-    elif action == "remove":
-        await cq.answer("Cookies removed.", show_alert=True)
+@app.on_message(filters.command("cookies"))
+async def cookies_status_cmd(_, message):
+    await cookies_status(message)
 
-# Register handlers
-register_cookie_handlers(app)
+# ---------------- REGISTER HANDLERS ----------------
 register_leech_handlers(app)
+register_ytdlp_handlers(app)
 
+# ---------------- CLEANUP ----------------
+@app.on_message(filters.command("cleanup"))
+async def cleanup_cmd(_, message):
+    await start_cleanup(message)
+
+# ---------------- RUN ----------------
 if __name__ == "__main__":
-    ensure_dirs()
-    log.info("Starting bot…")
+    logging.info("✅ Mongo-Leech Bot Started...")
     app.run()
