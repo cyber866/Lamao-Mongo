@@ -1,66 +1,38 @@
-# modules/utils.py
+import asyncio
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-import os
-import math
-from pymongo import MongoClient
+# Dictionary to keep track of cancel flags for each chat/task
+CANCEL_FLAGS = {}
 
-# ------------------ MongoDB cookies collection ------------------
-MONGO_URI = os.environ.get("MONGO_URI", "")
-if MONGO_URI:
-    client = MongoClient(MONGO_URI)
-    cookies_col = client["mongo_leech"]["cookies"]
-else:
-    cookies_col = None  # In case MongoDB URI is not set
+def set_cancel_flag(chat_id: int, task_id: str):
+    """Mark a task as cancelled."""
+    if chat_id not in CANCEL_FLAGS:
+        CANCEL_FLAGS[chat_id] = set()
+    CANCEL_FLAGS[chat_id].add(task_id)
 
-# ------------------ Exception ------------------
-class DownloadCancelled(Exception):
-    """Raised when a download or upload is cancelled"""
-    pass
+def clear_cancel_flag(chat_id: int, task_id: str):
+    """Remove cancel flag after task is done."""
+    if chat_id in CANCEL_FLAGS and task_id in CANCEL_FLAGS[chat_id]:
+        CANCEL_FLAGS[chat_id].remove(task_id)
 
-# ------------------ Directory helpers ------------------
-BASE_DIR = os.path.join(os.getcwd(), "data")
-DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
-COOKIES_DIR = os.path.join(BASE_DIR, "cookies")
+def is_cancelled(chat_id: int, task_id: str) -> bool:
+    """Check if this task has been cancelled."""
+    return chat_id in CANCEL_FLAGS and task_id in CANCEL_FLAGS[chat_id]
 
-def ensure_dirs():
-    """Ensure required directories exist"""
-    for d in [BASE_DIR, DOWNLOADS_DIR, COOKIES_DIR]:
-        os.makedirs(d, exist_ok=True)
+def get_cancel_button(task_id: str):
+    """Return inline keyboard with cancel button for this task."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]]
+    )
 
-def data_paths(user_id):
-    """Return user-specific paths"""
-    user_dir = os.path.join(DOWNLOADS_DIR, str(user_id))
-    os.makedirs(user_dir, exist_ok=True)
-    return {
-        "downloads": user_dir,
-        "cookies": os.path.join(COOKIES_DIR, f"{user_id}_cookies.txt")
-    }
-
-# ------------------ Helpers ------------------
-def humanbytes(size):
-    """Convert bytes to human-readable format"""
-    if not size:
-        return "0B"
-    power = 2**10
-    n = 0
-    units = ["B", "KB", "MB", "GB", "TB"]
-    while size >= power and n < len(units)-1:
-        size /= power
-        n += 1
-    return f"{size:.2f}{units[n]}"
-
-async def safe_edit_text(msg, text, reply_markup=None):
-    """Safely edit a Telegram message"""
+async def run_with_cancel(task_coro, chat_id: int, task_id: str, message):
+    """
+    Run a coroutine with cancellation check.
+    If cancelled, edit the message and stop execution.
+    """
     try:
-        await msg.edit(text, reply_markup=reply_markup)
-    except Exception:
-        pass
-
-# ------------------ Cancel tasks ------------------
-def cancel_task(active_tasks):
-    """
-    Cancels all ongoing download/upload tasks.
-    Sets 'cancel' flag for each active task.
-    """
-    for tid in list(active_tasks.keys()):
-        active_tasks[tid]["cancel"] = True
+        await task_coro
+    except asyncio.CancelledError:
+        await message.edit_text("🚫 Task cancelled by user.")
+    finally:
+        clear_cancel_flag(chat_id, task_id)
