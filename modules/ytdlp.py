@@ -220,12 +220,12 @@ def register_ytdl_handlers(app: Client):
 
                         await app.send_document(q.message.chat.id, fpath, caption=f"✅ Uploaded part {idx}/{total_parts}: `{part_name}`", progress=upload_progress)
 
-                await updater.queue.put("✅ All parts uploaded successfully!")
+                await st.edit("✅ All parts uploaded successfully!")
 
             except DownloadCancelled:
-                await updater.queue.put("❌ Download/Upload cancelled.")
+                await st.edit("❌ Download/Upload cancelled.")
             except Exception as e:
-                await updater.queue.put(f"❌ Error: {e}")
+                await st.edit(f"❌ Error: {e}")
             finally:
                 updater.stop()
                 ACTIVE_TASKS.pop(tid, None)
