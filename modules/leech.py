@@ -3,136 +3,103 @@ import uuid
 import logging
 import asyncio
 import time
-import re
 import requests
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
-from .file_splitter import split_file   # ✅ use file splitter
 
 log = logging.getLogger("leech")
-
 ACTIVE_TASKS = {}
-
-MAX_SIZE = 1900 * 1024 * 1024  # 1.9GB safe for Telegram
 
 def cancel_btn(tid):
     return InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Cancel", callback_data=f"cancel:{tid}")]])
 
 def sanitize_filename(name):
     """Remove characters Telegram cannot handle"""
-    name = re.sub(r'[\\/*?:"<>|]', "", name)
     return name.strip()
 
 def register_leech_handlers(app: Client):
     @app.on_message(filters.command("leech"))
-    async def cmd(_, m):
+    async def cmd_leech(_, m: Message):
         args = m.text.split(maxsplit=1)
         if len(args) < 2:
-            return await m.reply("Usage: /leech <direct_file_url>")
+            return await m.reply("Usage: `/leech <direct file URL>`")
+
         url = args[1].strip()
         user_id = m.from_user.id
         paths = data_paths(user_id)
         ensure_dirs()
-
-        msg = await m.reply("⏳ Checking file info…")
-
-        try:
-            head = requests.head(url, allow_redirects=True, timeout=10)
-            file_size = int(head.headers.get("Content-Length", 0))
-            file_name = url.split("/")[-1].split("?")[0] or f"file_{uuid.uuid4().hex}"
-        except Exception as e:
-            return await msg.edit(f"❌ Failed to fetch file info: {e}")
-
         tid = str(uuid.uuid4())[:8]
-        ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "cancel": False}
+        
+        ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "msg_id": None, "cancel": False}
 
-        await msg.edit(
-            f"📥 File: `{file_name}`\n"
-            f"📦 Size: {humanbytes(file_size)}\n\n"
-            f"▶ Ready to download…",
-            reply_markup=cancel_btn(tid)
-        )
+        msg = await m.reply("⏳ Starting direct file download...", reply_markup=cancel_btn(tid))
+        ACTIVE_TASKS[tid]["msg_id"] = msg.id
 
         async def runner():
             try:
-                local_path = os.path.join(paths["downloads"], sanitize_filename(file_name))
+                # Use aiohttp or requests to download the file
+                await download_file(url, paths["downloads"], tid, msg)
 
-                # ---------- Download ----------
-                with requests.get(url, stream=True) as r:
-                    r.raise_for_status()
-                    with open(local_path, "wb") as f:
-                        downloaded = 0
-                        last_update = 0
-                        for chunk in r.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
-                            if ACTIVE_TASKS.get(tid, {}).get("cancel"):
-                                raise DownloadCancelled()
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                            now = time.time()
-                            if now - last_update > 3:
-                                last_update = now
-                                pct = (downloaded / file_size * 100) if file_size else 0
-                                bar = "█" * int(pct // 5) + "░" * (20 - int(pct // 5))
-                                await safe_edit_text(
-                                    msg,
-                                    f"⬇ Downloading… {bar} {pct:.1f}%\n"
-                                    f"{humanbytes(downloaded)}/{humanbytes(file_size)}",
-                                    reply_markup=cancel_btn(tid)
-                                )
+                # After download, find the file and upload
+                filename = os.path.basename(url)
+                download_path = os.path.join(paths["downloads"], filename)
 
-                # ---------- Split if too big ----------
-                files_to_upload = []
-                if os.path.getsize(local_path) > MAX_SIZE:
-                    parts = split_file(local_path, MAX_SIZE)
-                    files_to_upload.extend([os.path.join(paths["downloads"], p) for p in parts])
-                    os.remove(local_path)
-                else:
-                    files_to_upload.append(local_path)
+                if not os.path.exists(download_path):
+                    await msg.edit("❌ Download failed. File not found.")
+                    return
 
-                # ---------- Upload ----------
-                total_parts = len(files_to_upload)
-                for idx, fpath in enumerate(files_to_upload, 1):
+                await msg.edit(f"✅ Download complete. Uploading `{filename}`...")
+                
+                async def upload_progress(cur, tot):
+                    frac = cur / tot * 100 if tot else 0
+                    bar = "█" * int(frac // 5) + "░" * (20 - int(frac // 5))
+                    await safe_edit_text(msg, f"Uploading... {bar} {frac:.1f}%\n⬆ {humanbytes(cur)}/{humanbytes(tot)}", reply_markup=cancel_btn(tid))
                     if ACTIVE_TASKS.get(tid, {}).get("cancel"):
                         raise DownloadCancelled()
-                    part_name = sanitize_filename(os.path.basename(fpath))
-                    if len(part_name) > 150:
-                        ext = os.path.splitext(part_name)[1]
-                        part_name = part_name[:150] + ext
 
-                    async def upload_progress(cur, tot):
-                        pct = (cur / tot * 100) if tot else 0
-                        bar = "█" * int(pct // 5) + "░" * (20 - int(pct // 5))
-                        await safe_edit_text(
-                            msg,
-                            f"⬆ Uploading part {idx}/{total_parts}… {bar} {pct:.1f}%\n"
-                            f"{humanbytes(cur)}/{humanbytes(tot)}",
-                            reply_markup=cancel_btn(tid)
-                        )
-
-                    await m.reply_document(
-                        fpath,
-                        caption=f"✅ Uploaded part {idx}/{total_parts}: `{part_name}`",
-                        progress=upload_progress
-                    )
-
-                await msg.edit("✅ All parts uploaded successfully!")
+                await app.send_document(m.chat.id, download_path, progress=upload_progress)
+                await msg.edit(f"✅ Uploaded `{filename}` successfully!")
 
             except DownloadCancelled:
                 await msg.edit("❌ Download/Upload cancelled.")
             except Exception as e:
                 await msg.edit(f"❌ Error: {e}")
             finally:
-                ACTIVE_TASKS.pop(tid, None)
-
+                if tid in ACTIVE_TASKS:
+                    ACTIVE_TASKS.pop(tid)
+        
         asyncio.create_task(runner())
 
-    @app.on_callback_query(filters.regex(r"^cancel:(.+)$"))
-    async def cancel_cb(_, q):
-        tid = q.data.split(":")[1]
-        if tid in ACTIVE_TASKS:
-            ACTIVE_TASKS[tid]["cancel"] = True
-            await q.answer("⛔ Task cancelled.", show_alert=True)
-        else:
-            await q.answer("❌ Task not found.", show_alert=True)
+async def download_file(url, path, tid, msg):
+    try:
+        filename = os.path.basename(url)
+        filepath = os.path.join(path, filename)
+
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("URL is not valid")
+
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            total_size = int(r.headers.get("content-length", 0))
+            downloaded = 0
+            start_time = time.time()
+            
+            with open(filepath, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if ACTIVE_TASKS.get(tid, {}).get("cancel"):
+                        raise DownloadCancelled()
+                    
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    if time.time() - start_time > 2:
+                        start_time = time.time()
+                        pct = (downloaded / total_size) * 100 if total_size > 0 else 0
+                        bar = "█" * int(pct // 5) + "░" * (20 - int(pct // 5))
+                        asyncio.create_task(
+                            safe_edit_text(msg, f"Downloading... {bar} {pct:.1f}%\n⬇ {humanbytes(downloaded)}/{humanbytes(total_size)}", reply_markup=cancel_btn(tid))
+                        )
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Failed to download file: {e}")
