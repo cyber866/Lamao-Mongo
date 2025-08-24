@@ -69,7 +69,7 @@ def register_drive_handlers(app: Client):
 async def download_file(app, url, msg, paths, tid):
     """
     Downloads a file from a URL using gdown and then uploads it to Telegram.
-    This version includes a robust progress bar for the upload phase and better
+    This version includes robust retries for the upload phase and better
     error handling to prevent silent failures.
     """
     file_path = ""
@@ -78,9 +78,7 @@ async def download_file(app, url, msg, paths, tid):
     try:
         await safe_edit_text(msg, "🔍 Starting download...", reply_markup=cancel_btn(tid))
         
-        # We'll use the gdown library to handle the download, but won't rely on its
-        # stdout for progress, as that proved unreliable.
-        # Instead, we focus on the upload progress, which is what you really need.
+        # We'll use the gdown library to handle the download.
         try:
             import gdown
         except ImportError:
@@ -145,19 +143,32 @@ async def download_file(app, url, msg, paths, tid):
                 progress_text += f"**Size:** {humanbytes(current)} / {humanbytes(total)}"
                 
                 await safe_edit_text(msg, progress_text, reply_markup=cancel_btn(tid))
-                
-            # Perform the upload
-            # Ensure the file path still exists right before upload
-            if not os.path.exists(fpath):
-                raise FileNotFoundError(f"File to upload not found: {fpath}")
-                
-            await app.send_document(
-                msg.chat.id,
-                fpath,
-                caption=f"✅ Uploaded part {idx}/{total_parts}: `{os.path.basename(fpath)}`",
-                progress=upload_progress
-            )
             
+            # Use a retry loop for the upload
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    await safe_edit_text(msg, f"**Attempt {attempt + 1}/{retries}:** Uploading part {idx}/{total_parts}...", reply_markup=cancel_btn(tid))
+                    
+                    # Ensure the file path still exists right before upload
+                    if not os.path.exists(fpath):
+                        raise FileNotFoundError(f"File to upload not found: {fpath}")
+                    
+                    await app.send_document(
+                        msg.chat.id,
+                        fpath,
+                        caption=f"✅ Uploaded part {idx}/{total_parts}: `{os.path.basename(fpath)}`",
+                        progress=upload_progress
+                    )
+                    log.info(f"Successfully uploaded part {idx}.")
+                    break  # Exit the retry loop on success
+                except Exception as upload_e:
+                    log.error(f"Error during file upload on attempt {attempt + 1}: {upload_e}")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(5)  # Wait 5 seconds before retrying
+                    else:
+                        raise  # Re-raise the exception after all retries fail
+
         await safe_edit_text(msg, "✅ All parts uploaded successfully!")
 
     except DownloadCancelled:
@@ -174,4 +185,3 @@ async def download_file(app, url, msg, paths, tid):
         for part_file in glob.glob(os.path.join(download_dir, 'split_part_*')):
             if os.path.exists(part_file):
                 os.remove(part_file)
-
