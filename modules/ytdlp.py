@@ -8,6 +8,7 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
+from .file_splitter import split_file # 📥 Import the file_splitter
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
@@ -122,11 +123,21 @@ def register_ytdl_handlers(app: Client):
 
         async def runner():
             nonlocal last_upload_update
+            fpaths = []
             try:
-                fpaths, fname = await asyncio.to_thread(
+                full_path, fname = await asyncio.to_thread(
                     download_media, url, paths["downloads"], paths["cookies"], progress_hook, fmt
                 )
-
+                
+                filesize = os.path.getsize(full_path)
+                
+                if filesize <= MAX_SIZE:
+                    fpaths = [full_path]
+                else:
+                    await st.edit(f"✅ Download complete. Splitting file into parts…")
+                    fpaths = await asyncio.to_thread(split_file, full_path, MAX_SIZE)
+                    os.remove(full_path) # Remove the large original file after splitting
+                    
                 total_parts = len(fpaths)
                 for idx, fpath in enumerate(fpaths, 1):
                     if ACTIVE_TASKS.get(tid, {}).get("cancel"):
@@ -195,6 +206,10 @@ def register_ytdl_handlers(app: Client):
                 await st.edit(f"❌ Error: {e}")
             finally:
                 ACTIVE_TASKS.pop(tid, None)
+                # Cleanup: remove all files after a successful or failed task
+                for fpath in fpaths:
+                    if os.path.exists(fpath):
+                        os.remove(fpath)
 
         asyncio.create_task(runner())
 
@@ -262,38 +277,18 @@ def list_formats(url, cookies=None):
 
 
 def download_media(url, path, cookies, progress_hook, fmt_id):
-    """Download media and split into Telegram-safe chunks if needed"""
+    """Download media and return the path to the downloaded file."""
     opts = {
         "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
         "cookiefile": cookies if cookies else None,
         "progress_hooks": [progress_hook],
         "format": fmt_id
     }
-
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         full_path = ydl.prepare_filename(info)
-        filesize = os.path.getsize(full_path)
+        return full_path, info.get("title")
 
-        if filesize <= MAX_SIZE:
-            return [full_path], info.get("title")
-
-        part_paths = []
-        with open(full_path, "rb") as f:
-            idx = 1
-            while True:
-                chunk = f.read(MAX_SIZE)
-                if not chunk:
-                    break
-                base, ext = os.path.splitext(full_path)
-                part_file = f"{base}.part{idx}{ext}"
-                with open(part_file, "wb") as pf:
-                    pf.write(chunk)
-                part_paths.append(part_file)
-                idx += 1
-
-        os.remove(full_path)
-        return part_paths, info.get("title")
 
 def get_progress_bar(percentage):
     """Generates a progress bar string."""
