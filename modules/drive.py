@@ -1,8 +1,8 @@
 #
 # This module handles the /drive command for downloading direct file
-# links from services like Google Drive. It uses the gdown library
-# to get the final download URL and then handles the stream to show
-# download progress with aiohttp.
+# links from services like Google Drive. It smartly handles both
+# preview and direct download URLs using aiohttp for streaming
+# and progress bar updates.
 #
 
 import os
@@ -10,11 +10,11 @@ import uuid
 import logging
 import asyncio
 import time
-import requests
 import aiohttp
+import requests
+from bs4 import BeautifulSoup
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-import gdown
 
 # Assuming these imports are correct based on your project structure.
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
@@ -70,22 +70,57 @@ def register_drive_handlers(app: Client):
         else:
             await q.answer("❌ Task not found.", show_alert=True)
 
+async def resolve_gdrive_url_async(url):
+    """
+    Asynchronously resolves a Google Drive URL to the direct download link.
+    """
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        
+        # Step 1: Use a regular GET request to get the HTML content.
+        # We'll parse this content for the download URL.
+        response = await asyncio.to_thread(requests.get, url, headers=headers)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for the download link on the page.
+        # This covers both the preview page and the warning page for large files.
+        download_link = soup.find('a', {'href': lambda href: href and 'export=download' in href})
+        
+        if download_link:
+            # If the link is relative, make it absolute
+            resolved_url = download_link['href']
+            if not resolved_url.startswith('http'):
+                # This constructs the full URL from the base URL and the relative link.
+                resolved_url = f"https://drive.google.com{resolved_url}"
+            return resolved_url
+
+        # Fallback to the direct download button if the previous method fails.
+        download_button_link = soup.find('a', {'id': 'uc-download-link'})
+        if download_button_link:
+            return download_button_link['href']
+
+        raise ValueError("Could not find a download link on the Google Drive page. The URL might be invalid, private, or a folder.")
+
+    except Exception as e:
+        log.error(f"Error resolving Google Drive URL: {e}")
+        return None
+
 async def download_file(app, url, msg, paths, tid):
     """
     Downloads a file from a URL with a progress bar and sends it.
     """
     full_path = ""
     try:
-        # Step 1: Resolve the final download URL using gdown
-        # We use asyncio.to_thread because gdown.download is a blocking, synchronous function.
-        await safe_edit_text(msg, "🔍 Resolving Google Drive URL...", reply_markup=cancel_btn(tid))
-        
-        # gdown.download is a cleaner way to get the final URL
-        final_url = await asyncio.to_thread(gdown.download, url, output=None, fuzzy=True, quiet=True)
+        # Step 1: Resolve the final download URL
+        await safe_edit_text(msg, "🔍 Resolving URL...", reply_markup=cancel_btn(tid))
+        final_url = await resolve_gdrive_url_async(url)
         
         if not final_url:
-            raise Exception("Failed to resolve the direct download link.")
+            raise Exception("Failed to resolve the direct download link. The URL might be invalid, private, or a folder.")
             
+        # Get filename and handle potential name from headers
         fname = os.path.basename(final_url.split('?')[0])
         full_path = os.path.join(paths["downloads"], fname)
         
