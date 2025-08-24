@@ -64,7 +64,7 @@ def register_drive_handlers(app: Client):
             ACTIVE_TASKS[tid]["cancel"] = True
             await q.answer("⛔ Task cancelled.", show_alert=True)
         else:
-            await q.answer("❌ Task not found.", show_alert=True)
+            await q.answer("❌ Task not found.")
 
 async def download_file(app, url, msg, paths, tid):
     """
@@ -195,21 +195,27 @@ async def download_file(app, url, msg, paths, tid):
                         reply_markup=cancel_btn(tid)
                     )
                 
-                await app.send_document(
-                    msg.chat.id,
-                    fpath,
-                    caption=f"✅ Uploaded part {idx}/{total_parts}: `{os.path.basename(fpath)}`",
-                    progress=upload_progress
-                )
-                os.remove(fpath) # Clean up the uploaded part
+                try:
+                    await app.send_document(
+                        msg.chat.id,
+                        fpath,
+                        caption=f"✅ Uploaded part {idx}/{total_parts}: `{os.path.basename(fpath)}`",
+                        progress=upload_progress
+                    )
+                except Exception as upload_e:
+                    # Log and re-raise the exception to be caught by the main handler
+                    log.error(f"Error during file upload: {upload_e}")
+                    raise
+                finally:
+                    # Ensure the file is cleaned up, even if the upload fails
+                    if os.path.exists(fpath):
+                        os.remove(fpath)
             
             await safe_edit_text(msg, "✅ All parts uploaded successfully!")
 
         except Exception as upload_e:
             log.error(f"Error during file upload: {upload_e}")
             await safe_edit_text(msg, f"❌ Upload failed: {upload_e}")
-            if file_path and os.path.exists(file_path):
-                os.remove(file_path)
 
     except DownloadCancelled:
         await safe_edit_text(msg, "❌ Download/Upload cancelled.")
