@@ -2,7 +2,13 @@
 
 import os
 import math
+import logging
+import asyncio
+from pyrogram.errors import FloodWait, MessageNotModified
+from pyrogram.types import Message
 from pymongo import MongoClient
+
+log = logging.getLogger("utils")
 
 # ------------------ MongoDB cookies collection ------------------
 MONGO_URI = os.environ.get("MONGO_URI", "")
@@ -49,12 +55,22 @@ def humanbytes(size):
         n += 1
     return f"{size:.2f}{units[n]}"
 
-async def safe_edit_text(msg, text, reply_markup=None):
-    """Safely edit a Telegram message"""
-    try:
-        await msg.edit(text, reply_markup=reply_markup)
-    except Exception:
-        pass
+async def safe_edit_text(msg: Message, text: str, reply_markup=None):
+    """
+    Edits a message with robust error handling for API flooding and message modification.
+    """
+    while True:
+        try:
+            await msg.edit_text(text, reply_markup=reply_markup)
+            break
+        except FloodWait as e:
+            log.warning(f"FloodWait: {e.value}s. Sleeping...")
+            await asyncio.sleep(e.value)
+        except MessageNotModified:
+            break
+        except Exception as e:
+            log.error(f"Failed to edit message: {e}")
+            break
 
 # ------------------ Cancel tasks ------------------
 def cancel_task(active_tasks):
