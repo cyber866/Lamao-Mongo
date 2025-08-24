@@ -1,4 +1,4 @@
-pyrogram
+#pyrogram
 pymongo
 yt-dlp
 dnspython
@@ -8,3 +8,16 @@ pyrogram
 bs4
 gdown
 aiohttp
+
+
+pyrogram==2.0.100
+aiohttp
+beautifulsoup4
+yt-dlp
+requests
+aiofiles
+psutil
+tzdata
+pytz
+Pillow
+gdown
