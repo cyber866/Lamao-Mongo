@@ -1,3 +1,8 @@
+#
+# This module handles the /ytdl command for downloading and sending
+# files from various supported websites using yt-dlp.
+#
+
 import os
 import uuid
 import logging
@@ -7,6 +12,7 @@ import re
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
+# Assuming these imports are correct based on your project structure.
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
 from .file_splitter import split_file
 import yt_dlp
@@ -32,7 +38,9 @@ def clean_ansi_codes(text):
     return ansi_escape.sub('', text)
 
 def register_ytdl_handlers(app: Client):
-    @app.on_message(filters.command("ytdl"))
+    # This function now correctly registers the command handlers.
+    # The filter is changed to allow commands in both private and group chats.
+    @app.on_message(filters.command("ytdl") & (filters.private | filters.group))
     async def cmd_ytdl(_, m: Message):
         args = m.text.split(maxsplit=1)
         if len(args) < 2:
@@ -184,8 +192,8 @@ def register_ytdl_handlers(app: Client):
                             frac = cur / tot * 100 if tot else 0
                             bar = get_progress_bar(frac)
                             await updater.queue.put(f"**Uploading**:\n`{fname}`\n"
-                                          f"{bar} **{frac:.1f}%**\n"
-                                          f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
+                                                    f"{bar} **{frac:.1f}%**\n"
+                                                    f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
                             if ACTIVE_TASKS.get(tid, {}).get("cancel"):
                                 raise DownloadCancelled()
 
@@ -212,9 +220,9 @@ def register_ytdl_handlers(app: Client):
                             frac = cur / tot * 100 if tot else 0
                             bar = get_progress_bar(frac)
                             await updater.queue.put(f"**Uploading part {idx}/{total_parts}**:\n"
-                                          f"`{part_name}`\n"
-                                          f"{bar} **{frac:.1f}%**\n"
-                                          f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
+                                                    f"`{part_name}`\n"
+                                                    f"{bar} **{frac:.1f}%**\n"
+                                                    f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
                             if ACTIVE_TASKS.get(tid, {}).get("cancel"):
                                 raise DownloadCancelled()
 
