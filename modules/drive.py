@@ -73,6 +73,7 @@ async def download_file(app, url, msg, paths, tid):
     error handling to prevent silent failures.
     """
     file_path = ""
+    fpaths = []
     download_dir = paths["downloads"]
     
     try:
@@ -181,7 +182,7 @@ async def download_file(app, url, msg, paths, tid):
         # Clean up any remaining files from the download process
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
-        # Clean up any split parts
-        for part_file in glob.glob(os.path.join(download_dir, 'split_part_*')):
+        # Clean up any split parts from the list of file paths
+        for part_file in fpaths:
             if os.path.exists(part_file):
                 os.remove(part_file)
