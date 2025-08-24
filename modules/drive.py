@@ -1,22 +1,16 @@
 #
 # This module handles the /drive command for downloading direct file
-# links from services like Google Drive. It smartly handles both
-# preview and direct download URLs using aiohttp for streaming
-# and progress bar updates.
+# links from services like Google Drive using the gdown library.
 #
 
 import os
 import uuid
 import logging
 import asyncio
-import time
-import aiohttp
-import requests
-from bs4 import BeautifulSoup
+import re
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
-# Assuming these imports are correct based on your project structure.
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
 from .file_splitter import split_file
 
@@ -70,101 +64,92 @@ def register_drive_handlers(app: Client):
         else:
             await q.answer("❌ Task not found.", show_alert=True)
 
-async def resolve_gdrive_url_async(url):
-    """
-    Asynchronously resolves a Google Drive URL to the direct download link.
-    """
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        
-        # Step 1: Use a regular GET request to get the HTML content.
-        # We'll parse this content for the download URL.
-        response = await asyncio.to_thread(requests.get, url, headers=headers)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Look for the download link on the page.
-        # This covers both the preview page and the warning page for large files.
-        download_link = soup.find('a', {'href': lambda href: href and 'export=download' in href})
-        
-        if download_link:
-            # If the link is relative, make it absolute
-            resolved_url = download_link['href']
-            if not resolved_url.startswith('http'):
-                # This constructs the full URL from the base URL and the relative link.
-                resolved_url = f"https://drive.google.com{resolved_url}"
-            return resolved_url
-
-        # Fallback to the direct download button if the previous method fails.
-        download_button_link = soup.find('a', {'id': 'uc-download-link'})
-        if download_button_link:
-            return download_button_link['href']
-
-        raise ValueError("Could not find a download link on the Google Drive page. The URL might be invalid, private, or a folder.")
-
-    except Exception as e:
-        log.error(f"Error resolving Google Drive URL: {e}")
-        return None
-
 async def download_file(app, url, msg, paths, tid):
     """
-    Downloads a file from a URL with a progress bar and sends it.
+    Downloads a file from a URL using gdown with a progress bar.
     """
-    full_path = ""
+    file_path = ""
     try:
-        # Step 1: Resolve the final download URL
-        await safe_edit_text(msg, "🔍 Resolving URL...", reply_markup=cancel_btn(tid))
-        final_url = await resolve_gdrive_url_async(url)
+        # Extract the Google Drive file ID from the URL using a regex.
+        match = re.search(r'id=([a-zA-Z0-9_-]+)', url)
+        if not match:
+            raise ValueError("Invalid Google Drive URL. Could not find a file ID.")
         
-        if not final_url:
-            raise Exception("Failed to resolve the direct download link. The URL might be invalid, private, or a folder.")
+        file_id = match.group(1)
+        
+        await safe_edit_text(msg, "🔍 Starting download with `gdown`...", reply_markup=cancel_btn(tid))
+        
+        # Build the gdown command. We use --folder to handle both files and folders,
+        # and --id to specify the file. --no-cookies prevents gdown from using
+        # browser cookies, as this can sometimes cause issues.
+        # We also redirect output to stdout and stderr to capture it.
+        cmd = ["gdown", "--id", file_id, "--output", paths["downloads"]]
+        
+        # Start the gdown process.
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Read the output from the gdown process to get the progress.
+        downloaded = 0
+        total_size = 0
+        file_name = ""
+        
+        async for line in process.stdout:
+            line = line.decode('utf-8').strip()
+            # The output from gdown changes, so we need to be flexible.
+            # Look for lines containing file info and download progress.
+            if "File: " in line:
+                file_name = line.split("File: ", 1)[1].strip()
+                file_path = os.path.join(paths["downloads"], file_name)
+            elif "Total: " in line:
+                total_size_str = re.search(r'Total: ([\d.]+) (K|M|G)B', line)
+                if total_size_str:
+                    value = float(total_size_str.group(1))
+                    unit = total_size_str.group(2)
+                    if unit == 'K': total_size = value * 1024
+                    elif unit == 'M': total_size = value * 1024 * 1024
+                    elif unit == 'G': total_size = value * 1024 * 1024 * 1024
+            elif "Downloaded: " in line:
+                downloaded_str = re.search(r'Downloaded: ([\d.]+) (K|M|G)B', line)
+                if downloaded_str:
+                    value = float(downloaded_str.group(1))
+                    unit = downloaded_str.group(2)
+                    if unit == 'K': downloaded = value * 1024
+                    elif unit == 'M': downloaded = value * 1024 * 1024
+                    elif unit == 'G': downloaded = value * 1024 * 1024 * 1024
+
+            if not file_name:
+                continue
+
+            percentage = (downloaded / total_size) * 100 if total_size else 0
             
-        # Get filename and handle potential name from headers
-        fname = os.path.basename(final_url.split('?')[0])
-        full_path = os.path.join(paths["downloads"], fname)
+            progress_text = f"**Downloading**:\n"
+            progress_text += f"**File:** `{file_name}`\n"
+            progress_text += f"{get_progress_bar(percentage)} **{percentage:.1f}%**\n"
+            progress_text += f"**Size:** {humanbytes(downloaded)} / {humanbytes(total_size)}"
+            
+            await safe_edit_text(msg, progress_text, reply_markup=cancel_btn(tid))
+            
+            # Check for cancellation
+            if ACTIVE_TASKS.get(tid, {}).get("cancel"):
+                process.terminate()
+                raise DownloadCancelled()
         
-        await safe_edit_text(msg, f"Starting download of: `{fname}`", reply_markup=cancel_btn(tid))
-        
-        # Step 2: Stream the download with aiohttp and a progress bar
-        async with aiohttp.ClientSession() as session:
-            async with session.get(final_url) as response:
-                response.raise_for_status() # Raise an error for bad status codes
-                
-                total_size = int(response.headers.get("content-length", 0))
-                downloaded = 0
-                last_update = 0
-                
-                with open(full_path, 'wb') as f:
-                    async for chunk in response.content.iter_chunked(8192):
-                        if ACTIVE_TASKS.get(tid, {}).get("cancel"):
-                            raise DownloadCancelled()
-                        
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        now = time.time()
-                        if now - last_update > 2: # Update progress every 2 seconds
-                            last_update = now
-                            percentage = (downloaded / total_size) * 100 if total_size else 0
-                            
-                            progress_text = f"**Downloading**:\n"
-                            progress_text += f"**File:** `{fname}`\n"
-                            progress_text += f"{get_progress_bar(percentage)} **{percentage:.1f}%**\n"
-                            progress_text += f"**Size:** {humanbytes(downloaded)} / {humanbytes(total_size)}"
-                            
-                            await safe_edit_text(msg, progress_text, reply_markup=cancel_btn(tid))
+        await process.wait() # Wait for the process to complete.
         
         await safe_edit_text(msg, "✅ Download complete. Uploading file...")
         
         # Check if file needs to be split
-        filesize = os.path.getsize(full_path)
+        filesize = os.path.getsize(file_path)
         if filesize > MAX_SIZE:
             await safe_edit_text(msg, f"✅ Download complete. Splitting file into parts…")
-            fpaths = await asyncio.to_thread(split_file, full_path, MAX_SIZE)
-            os.remove(full_path)
+            fpaths = await asyncio.to_thread(split_file, file_path, MAX_SIZE)
+            os.remove(file_path)
         else:
-            fpaths = [full_path]
+            fpaths = [file_path]
             
         total_parts = len(fpaths)
         for idx, fpath in enumerate(fpaths, 1):
@@ -205,8 +190,9 @@ async def download_file(app, url, msg, paths, tid):
     except DownloadCancelled:
         await safe_edit_text(msg, "❌ Download/Upload cancelled.")
     except Exception as e:
+        log.error(f"Error during gdown process: {e}")
         await safe_edit_text(msg, f"❌ Error: {e}")
     finally:
         ACTIVE_TASKS.pop(tid, None)
-        if 'full_path' in locals() and os.path.exists(full_path):
-            os.remove(full_path)
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
