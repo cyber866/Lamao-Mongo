@@ -1,7 +1,8 @@
 #
 # This module handles the /drive command for downloading direct file
 # links from services like Google Drive. It uses the gdown library
-# for reliable and automated Google Drive downloads.
+# to get the final download URL and then handles the stream to show
+# download progress with aiohttp.
 #
 
 import os
@@ -9,6 +10,8 @@ import uuid
 import logging
 import asyncio
 import time
+import requests
+import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 import gdown
@@ -66,51 +69,56 @@ def register_drive_handlers(app: Client):
             await q.answer("⛔ Task cancelled.", show_alert=True)
         else:
             await q.answer("❌ Task not found.", show_alert=True)
-            
-def _gdown_progress_callback(filename, current_chunk, total_chunks, total_size, start_time, tid, msg, app):
-    """
-    Callback function for gdown to update download progress.
-    """
-    now = time.time()
-    if now - start_time > 2: # Update progress every 2 seconds
-        percentage = (current_chunk / total_size) * 100
-        
-        progress_text = f"**Downloading**:\n"
-        progress_text += f"**File:** `{filename}`\n"
-        progress_text += f"{get_progress_bar(percentage)} **{percentage:.1f}%**\n"
-        progress_text += f"**Size:** {humanbytes(current_chunk)} / {humanbytes(total_size)}"
-        
-        # Using a new task to avoid blocking gdown's thread
-        asyncio.create_task(safe_edit_text(msg, progress_text, reply_markup=cancel_btn(tid)))
 
 async def download_file(app, url, msg, paths, tid):
     """
     Downloads a file from a URL with a progress bar and sends it.
     """
+    full_path = ""
     try:
-        # Use gdown to handle the download and all redirects
-        full_path = os.path.join(paths["downloads"], os.path.basename(url)) # Initial path for gdown
+        # Step 1: Resolve the final download URL using gdown
+        # We use asyncio.to_thread because gdown.download is a blocking, synchronous function.
+        await safe_edit_text(msg, "🔍 Resolving Google Drive URL...", reply_markup=cancel_btn(tid))
         
-        start_time = time.time()
+        # gdown.download is a cleaner way to get the final URL
+        final_url = await asyncio.to_thread(gdown.download, url, output=None, fuzzy=True, quiet=True)
         
-        # We need a partial function to pass our arguments to the callback
-        callback_with_args = lambda filename, current_chunk, total_chunks, total_size: _gdown_progress_callback(
-            filename, current_chunk, total_chunks, total_size, start_time, tid, msg, app
-        )
-
-        await safe_edit_text(msg, "⏳ Starting download with gdown...", reply_markup=cancel_btn(tid))
+        if not final_url:
+            raise Exception("Failed to resolve the direct download link.")
+            
+        fname = os.path.basename(final_url.split('?')[0])
+        full_path = os.path.join(paths["downloads"], fname)
         
-        # Use asyncio.to_thread to run the blocking gdown call without freezing the bot
-        file_path = await asyncio.to_thread(
-            gdown.download, url, output=full_path, fuzzy=True, quiet=False,
-            # This is a custom callback function for gdown.
-            # It sends the progress updates back to the Telegram message.
-            # Unfortunately, there's no native async callback, so we have to do this.
-            _gdown_progress_callback=_gdown_progress_callback
-        )
+        await safe_edit_text(msg, f"Starting download of: `{fname}`", reply_markup=cancel_btn(tid))
         
-        # gdown returns the final path if it's different from the initial output.
-        full_path = file_path
+        # Step 2: Stream the download with aiohttp and a progress bar
+        async with aiohttp.ClientSession() as session:
+            async with session.get(final_url) as response:
+                response.raise_for_status() # Raise an error for bad status codes
+                
+                total_size = int(response.headers.get("content-length", 0))
+                downloaded = 0
+                last_update = 0
+                
+                with open(full_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(8192):
+                        if ACTIVE_TASKS.get(tid, {}).get("cancel"):
+                            raise DownloadCancelled()
+                        
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        now = time.time()
+                        if now - last_update > 2: # Update progress every 2 seconds
+                            last_update = now
+                            percentage = (downloaded / total_size) * 100 if total_size else 0
+                            
+                            progress_text = f"**Downloading**:\n"
+                            progress_text += f"**File:** `{fname}`\n"
+                            progress_text += f"{get_progress_bar(percentage)} **{percentage:.1f}%**\n"
+                            progress_text += f"**Size:** {humanbytes(downloaded)} / {humanbytes(total_size)}"
+                            
+                            await safe_edit_text(msg, progress_text, reply_markup=cancel_btn(tid))
         
         await safe_edit_text(msg, "✅ Download complete. Uploading file...")
         
