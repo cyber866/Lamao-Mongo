@@ -40,7 +40,7 @@ def register_ytdl_handlers(app: Client):
         msg = await m.reply("🔍 Fetching formats…")
 
         try:
-            fmts, info = await asyncio.to_thread(list_formats, url, paths["cookies"])
+            fmts = await asyncio.to_thread(list_formats, url, paths["cookies"])
         except Exception as e:
             return await msg.edit(f"❌ Error fetching formats: {e}")
 
@@ -48,8 +48,7 @@ def register_ytdl_handlers(app: Client):
             return await msg.edit("❌ No formats found.")
 
         tid = str(uuid.uuid4())[:8]
-        # Store info in ACTIVE_TASKS for later use
-        ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "msg_id": msg.id, "cancel": False, "info": info, "fmts": fmts}
+        ACTIVE_TASKS[tid] = {"user_id": user_id, "url": url, "msg_id": msg.id, "cancel": False}
 
         kb = []
         row = []
@@ -70,7 +69,7 @@ def register_ytdl_handlers(app: Client):
 
     @app.on_callback_query(filters.regex(r"^choose_ytdl:(.+?):(.+)$"))
     async def cb_ytdl(_, q):
-        tid, fmt_id = q.data.split(":")[1:]
+        tid, fmt = q.data.split(":")[1:]
         task_info = ACTIVE_TASKS.get(tid)
         if not task_info:
             return await q.answer("❌ Task not found or expired.", show_alert=True)
@@ -78,18 +77,14 @@ def register_ytdl_handlers(app: Client):
         url = task_info["url"]
         user_id = task_info["user_id"]
         paths = data_paths(user_id)
-        
-        selected_fmt = next((f for f in task_info['fmts'] if str(f['id']) == fmt_id), None)
-        if not selected_fmt:
-            return await q.answer("❌ Format not found.", show_alert=True)
-            
+
         st = await q.message.edit("⏳ Preparing download…", reply_markup=cancel_btn(tid))
         main_loop = asyncio.get_running_loop()
         last_download_update = 0
         last_upload_update = 0
-        
+
         async def updater(txt):
-            await safe_edit_text(st, f"{txt}", reply_markup=cancel_btn(tid))
+            await safe_edit_text(st, f"{txt}\n\n`{url}`", reply_markup=cancel_btn(tid))
 
         def progress_hook(d):
             nonlocal last_download_update
@@ -128,52 +123,48 @@ def register_ytdl_handlers(app: Client):
         async def runner():
             nonlocal last_upload_update
             try:
-                fpaths, fname, thumb_path = await asyncio.to_thread(
-                    download_media, url, paths["downloads"], paths["cookies"], progress_hook, fmt_id
+                fpaths, fname = await asyncio.to_thread(
+                    download_media, url, paths["downloads"], paths["cookies"], progress_hook, fmt
                 )
 
                 total_parts = len(fpaths)
-                
-                # Get resolution and source URL
-                resolution = f"{selected_fmt.get('res')}p" if selected_fmt.get('res') > 0 else "Audio"
-                source_url = task_info['info'].get('webpage_url', url)
-                
-                # Build the caption
-                caption = f"**Title:** `{fname}`\n"
-                caption += f"**Resolution:** `{resolution}`\n"
-                caption += f"**Source:** [Link]({source_url})"
+                for idx, fpath in enumerate(fpaths, 1):
+                    if ACTIVE_TASKS.get(tid, {}).get("cancel"):
+                        await st.edit("❌ Upload cancelled by user.")
+                        return
 
-                # Check if it's a single file and a video format for streaming
-                file_ext = os.path.splitext(fpaths[0])[1].lower()
-                is_video = file_ext in ['.mp4', '.mkv', '.avi', '.mov', '.webm']
-                
-                if total_parts == 1 and is_video:
-                    async def upload_progress(cur, tot):
-                        nonlocal last_upload_update
-                        now = time.time()
-                        if now - last_upload_update < 2:
-                            return
-                        last_upload_update = now
-                        frac = cur / tot * 100 if tot else 0
-                        bar = get_progress_bar(frac)
-                        await updater(f"**Uploading**:\n`{fname}`\n"
-                                      f"{bar} {frac:.1f}%\n"
-                                      f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
-                        if ACTIVE_TASKS.get(tid, {}).get("cancel"):
-                            raise DownloadCancelled()
+                    if not os.path.exists(fpath):
+                        await st.edit(f"❌ File not found: {fpath}")
+                        continue
 
-                    await app.send_video(
-                        q.message.chat.id,
-                        fpaths[0],
-                        caption=caption,
-                        thumb=thumb_path, # Pass the thumbnail path here
-                        progress=upload_progress
-                    )
-                else:
-                    # Send as a document for multi-part files or non-video formats
-                    await st.edit("⚠️ File too large for streaming or not a video. Sending as document(s)...")
-                    for idx, fpath in enumerate(fpaths, 1):
-                        # ... (rest of document upload logic remains the same)
+                    # Determine if it should be sent as video or document
+                    file_ext = os.path.splitext(fpath)[1].lower()
+                    is_video = file_ext in ['.mp4', '.mkv', '.avi', '.mov', '.webm']
+                    
+                    if total_parts == 1 and is_video:
+                        # Send as a streamable video
+                        async def upload_progress(cur, tot):
+                            nonlocal last_upload_update
+                            now = time.time()
+                            if now - last_upload_update < 2:
+                                return
+                            last_upload_update = now
+                            frac = cur / tot * 100 if tot else 0
+                            bar = get_progress_bar(frac)
+                            await updater(f"**Uploading**:\n`{fname}`\n"
+                                          f"{bar} {frac:.1f}%\n"
+                                          f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
+                            if ACTIVE_TASKS.get(tid, {}).get("cancel"):
+                                raise DownloadCancelled()
+
+                        await app.send_video(
+                            q.message.chat.id,
+                            fpath,
+                            caption=f"✅ Uploaded: `{fname}`",
+                            progress=upload_progress
+                        )
+                    else:
+                        # Send as a document for multi-part files or non-video formats
                         part_name = sanitize_filename(os.path.basename(fpath))
                         if len(part_name) > 150:
                             ext = os.path.splitext(part_name)[1]
@@ -228,7 +219,7 @@ def list_formats(url, cookies=None):
         try:
             info = ydl.extract_info(url, download=False)
         except DownloadError:
-            return [], {}
+            return []
 
         formats = info.get("formats", [])
         unique_fmts = {}
@@ -267,38 +258,25 @@ def list_formats(url, cookies=None):
                     }
 
         sorted_list = sorted(unique_fmts.values(), key=lambda x: (x['res'] == 0, -x['res'], x['size']), reverse=False)
-        return sorted_list, info
+        return sorted_list
+
 
 def download_media(url, path, cookies, progress_hook, fmt_id):
-    """Download media and split into Telegram-safe chunks if needed, also downloads thumbnail."""
-    
-    # Define paths for video and thumbnail
-    video_path = os.path.join(path, "%(title)s.%(ext)s")
-    thumb_path = os.path.join(path, "%(title)s.%(ext)s.thumb")
-
+    """Download media and split into Telegram-safe chunks if needed"""
     opts = {
-        "outtmpl": video_path,
+        "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
         "cookiefile": cookies if cookies else None,
         "progress_hooks": [progress_hook],
-        "format": fmt_id,
-        "writethumbnail": True,  # Enable thumbnail download
-        "postprocessors": [
-            {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'} if fmt_id.startswith('audio') else {},
-            {'key': 'SponsorBlock'}
-        ]
+        "format": fmt_id
     }
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         full_path = ydl.prepare_filename(info)
-        
-        # Check if a thumbnail was downloaded
-        thumbnail_path = ydl.prepare_filename(info, 'jpg')
-        
         filesize = os.path.getsize(full_path)
 
         if filesize <= MAX_SIZE:
-            return [full_path], info.get("title"), thumbnail_path
+            return [full_path], info.get("title")
 
         part_paths = []
         with open(full_path, "rb") as f:
@@ -315,7 +293,7 @@ def download_media(url, path, cookies, progress_hook, fmt_id):
                 idx += 1
 
         os.remove(full_path)
-        return part_paths, info.get("title"), thumbnail_path
+        return part_paths, info.get("title")
 
 def get_progress_bar(percentage):
     """Generates a progress bar string."""
