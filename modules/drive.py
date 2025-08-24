@@ -8,6 +8,8 @@ import uuid
 import logging
 import asyncio
 import re
+import glob
+import time
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
@@ -66,9 +68,10 @@ def register_drive_handlers(app: Client):
 
 async def download_file(app, url, msg, paths, tid):
     """
-    Downloads a file from a URL using gdown with a progress bar.
+    Downloads a file from a URL using gdown with a progress bar and improved error handling.
     """
     file_path = ""
+    download_dir = paths["downloads"]
     try:
         # Extract the Google Drive file ID from the URL using a regex.
         match = re.search(r'id=([a-zA-Z0-9_-]+)', url)
@@ -79,11 +82,8 @@ async def download_file(app, url, msg, paths, tid):
         
         await safe_edit_text(msg, "🔍 Starting download with `gdown`...", reply_markup=cancel_btn(tid))
         
-        # Build the gdown command. We use --folder to handle both files and folders,
-        # and --id to specify the file. --no-cookies prevents gdown from using
-        # browser cookies, as this can sometimes cause issues.
-        # We also redirect output to stdout and stderr to capture it.
-        cmd = ["gdown", "--id", file_id, "--output", paths["downloads"]]
+        # Start the gdown process. We use --output to specify the directory.
+        cmd = ["gdown", "--id", file_id, "--output", download_dir]
         
         # Start the gdown process.
         process = await asyncio.create_subprocess_exec(
@@ -99,11 +99,9 @@ async def download_file(app, url, msg, paths, tid):
         
         async for line in process.stdout:
             line = line.decode('utf-8').strip()
-            # The output from gdown changes, so we need to be flexible.
             # Look for lines containing file info and download progress.
             if "File: " in line:
                 file_name = line.split("File: ", 1)[1].strip()
-                file_path = os.path.join(paths["downloads"], file_name)
             elif "Total: " in line:
                 total_size_str = re.search(r'Total: ([\d.]+) (K|M|G)B', line)
                 if total_size_str:
@@ -139,58 +137,84 @@ async def download_file(app, url, msg, paths, tid):
                 raise DownloadCancelled()
         
         await process.wait() # Wait for the process to complete.
+
+        # New: Check for gdown process failure
+        if process.returncode != 0:
+            stderr = (await process.stderr.read()).decode('utf-8')
+            raise Exception(f"gdown process failed with code {process.returncode}:\n{stderr}")
         
+        # The gdown output isn't always reliable. Find the actual file in the directory.
+        if file_name:
+            file_path = os.path.join(download_dir, file_name)
+        else:
+            # Fallback: find the newest file in the download directory
+            list_of_files = glob.glob(os.path.join(download_dir, '*'))
+            if list_of_files:
+                file_path = max(list_of_files, key=os.path.getctime)
+            else:
+                raise Exception("Could not find the downloaded file.")
+        
+        # Final check to ensure the file exists and is not empty.
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            raise Exception("Downloaded file is empty or does not exist.")
+            
         await safe_edit_text(msg, "✅ Download complete. Uploading file...")
         
-        # Check if file needs to be split
-        filesize = os.path.getsize(file_path)
-        if filesize > MAX_SIZE:
-            await safe_edit_text(msg, f"✅ Download complete. Splitting file into parts…")
-            fpaths = await asyncio.to_thread(split_file, file_path, MAX_SIZE)
-            os.remove(file_path)
-        else:
-            fpaths = [file_path]
-            
-        total_parts = len(fpaths)
-        for idx, fpath in enumerate(fpaths, 1):
-            if ACTIVE_TASKS.get(tid, {}).get("cancel"):
-                raise DownloadCancelled()
+        # Corrected file splitting and upload logic
+        try:
+            # Check if file needs to be split
+            filesize = os.path.getsize(file_path)
+            if filesize > MAX_SIZE:
+                await safe_edit_text(msg, f"✅ Download complete. Splitting file into parts…")
+                fpaths = await asyncio.to_thread(split_file, file_path, MAX_SIZE)
+                os.remove(file_path)
+            else:
+                fpaths = [file_path]
                 
-            last_upload_update = 0
-            async def upload_progress(cur, tot):
-                nonlocal last_upload_update
-                now = time.time()
-                if now - last_upload_update < 2:
-                    return
-                last_upload_update = now
-                frac = cur / tot * 100 if tot else 0
-                bar = get_progress_bar(frac)
-                part_name = os.path.basename(fpath)
-                await safe_edit_text(
-                    msg,
-                    f"**Uploading part {idx}/{total_parts}**:\n"
-                    f"`{part_name}`\n"
-                    f"{bar} **{frac:.1f}%**\n"
-                    f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}",
-                    reply_markup=cancel_btn(tid)
-                )
+            total_parts = len(fpaths)
+            for idx, fpath in enumerate(fpaths, 1):
                 if ACTIVE_TASKS.get(tid, {}).get("cancel"):
                     raise DownloadCancelled()
+                    
+                last_upload_update = 0
+                async def upload_progress(cur, tot):
+                    nonlocal last_upload_update
+                    now = time.time()
+                    if now - last_upload_update < 2:
+                        return
+                    last_upload_update = now
+                    frac = cur / tot * 100 if tot else 0
+                    bar = get_progress_bar(frac)
+                    part_name = os.path.basename(fpath)
+                    await safe_edit_text(
+                        msg,
+                        f"**Uploading part {idx}/{total_parts}**:\n"
+                        f"`{part_name}`\n"
+                        f"{bar} **{frac:.1f}%**\n"
+                        f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}",
+                        reply_markup=cancel_btn(tid)
+                    )
+                
+                await app.send_document(
+                    msg.chat.id,
+                    fpath,
+                    caption=f"✅ Uploaded part {idx}/{total_parts}: `{os.path.basename(fpath)}`",
+                    progress=upload_progress
+                )
+                os.remove(fpath) # Clean up the uploaded part
             
-            await app.send_document(
-                msg.chat.id,
-                fpath,
-                caption=f"✅ Uploaded part {idx}/{total_parts}: `{os.path.basename(fpath)}`",
-                progress=upload_progress
-            )
-            os.remove(fpath) # Clean up the uploaded part
-            
-        await safe_edit_text(msg, "✅ All parts uploaded successfully!")
+            await safe_edit_text(msg, "✅ All parts uploaded successfully!")
+
+        except Exception as upload_e:
+            log.error(f"Error during file upload: {upload_e}")
+            await safe_edit_text(msg, f"❌ Upload failed: {upload_e}")
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
 
     except DownloadCancelled:
         await safe_edit_text(msg, "❌ Download/Upload cancelled.")
     except Exception as e:
-        log.error(f"Error during gdown process: {e}")
+        log.error(f"Error in drive command: {e}")
         await safe_edit_text(msg, f"❌ Error: {e}")
     finally:
         ACTIVE_TASKS.pop(tid, None)
