@@ -8,7 +8,7 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
 from .utils import data_paths, ensure_dirs, humanbytes, DownloadCancelled, safe_edit_text
-from .file_splitter import split_file # 📥 Import the file_splitter
+from .file_splitter import split_file
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
@@ -25,6 +25,11 @@ def sanitize_filename(name):
     """Remove characters Telegram cannot handle"""
     name = re.sub(r'[\\/*?:"<>|]', "", name)
     return name.strip()
+
+def clean_ansi_codes(text):
+    """Remove ANSI escape codes from a string."""
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
 
 def register_ytdl_handlers(app: Client):
     @app.on_message(filters.command("ytdl"))
@@ -78,55 +83,70 @@ def register_ytdl_handlers(app: Client):
         url = task_info["url"]
         user_id = task_info["user_id"]
         paths = data_paths(user_id)
-
+        
         st = await q.message.edit("⏳ Preparing download…", reply_markup=cancel_btn(tid))
-        main_loop = asyncio.get_running_loop()
-        last_download_update = 0
-        last_upload_update = 0
+        
+        class ProgressUpdater:
+            def __init__(self, msg, url):
+                self.msg = msg
+                self.url = url
+                self.queue = asyncio.Queue()
+                self.last_update = 0
+                self.task = None
 
-        async def updater(txt):
-            await safe_edit_text(st, f"{txt}\n\n`{url}`", reply_markup=cancel_btn(tid))
+            def start(self):
+                self.task = asyncio.create_task(self.updater_task())
 
-        def progress_hook(d):
-            nonlocal last_download_update
-            if d["status"] == "downloading":
-                now = time.time()
-                if now - last_download_update < 3: # Reduced update frequency for smoother UI
-                    return
-                last_download_update = now
+            def stop(self):
+                if self.task and not self.task.done():
+                    self.task.cancel()
 
-                pct = d.get("_percent_str", "").strip().replace("%", "")
-                downloaded = d.get("downloaded_bytes", 0)
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                
+            async def updater_task(self):
                 try:
-                    pct_float = float(pct)
-                except ValueError:
-                    pct_float = 0
-                
-                download_speed = d.get("_speed_str", "N/A").strip()
-                eta = d.get("_eta_str", "N/A").strip()
-                
-                progress_text = f"**Downloading**:\n"
-                progress_text += f"`{d.get('filename')[:40]}...`\n"
-                
-                bar = get_progress_bar(pct_float)
-                
-                progress_text += f"{bar} {pct_float:.1f}%\n"
-                progress_text += f"**Size:** {humanbytes(downloaded)} / {humanbytes(total)}\n"
-                progress_text += f"**Speed:** {download_speed} • **ETA:** {eta}"
+                    while True:
+                        text = await self.queue.get()
+                        await safe_edit_text(self.msg, f"{text}\n\n`{self.url}`", reply_markup=cancel_btn(tid))
+                        self.queue.task_done()
+                except asyncio.CancelledError:
+                    pass
 
-                main_loop.call_soon_threadsafe(
-                    asyncio.create_task,
-                    updater(progress_text)
-                )
+            def progress_hook(self, d):
+                if d["status"] == "downloading":
+                    now = time.time()
+                    if now - self.last_update < 3:
+                        return
+                    self.last_update = now
+                    
+                    pct_str = d.get("_percent_str", "").strip()
+                    if not pct_str:
+                         return
+                    
+                    pct = float(clean_ansi_codes(pct_str).replace('%', ''))
+                    downloaded = d.get("downloaded_bytes", 0)
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    
+                    download_speed = clean_ansi_codes(d.get("_speed_str", "N/A")).strip()
+                    eta = clean_ansi_codes(d.get("_eta_str", "N/A")).strip()
+                    
+                    progress_text = f"**Downloading**:\n"
+                    progress_text += f"**File:** `{clean_ansi_codes(d.get('filename', 'Unknown File'))}`\n"
+                    
+                    bar = get_progress_bar(pct)
+                    
+                    progress_text += f"{bar} **{pct:.1f}%**\n"
+                    progress_text += f"**Size:** {humanbytes(downloaded)} / {humanbytes(total)}\n"
+                    progress_text += f"**Speed:** {download_speed} • **ETA:** {eta}"
+                    
+                    self.queue.put_nowait(progress_text)
 
         async def runner():
-            nonlocal last_upload_update
             fpaths = []
+            updater = ProgressUpdater(st, url)
+            updater.start()
             try:
+                await st.edit("✅ Download starting...", reply_markup=cancel_btn(tid))
                 full_path, fname = await asyncio.to_thread(
-                    download_media, url, paths["downloads"], paths["cookies"], progress_hook, fmt
+                    download_media, url, paths["downloads"], paths["cookies"], updater.progress_hook, fmt
                 )
                 
                 filesize = os.path.getsize(full_path)
@@ -153,6 +173,7 @@ def register_ytdl_handlers(app: Client):
                     is_video = file_ext in ['.mp4', '.mkv', '.avi', '.mov', '.webm']
                     
                     if total_parts == 1 and is_video:
+                        last_upload_update = 0
                         # Send as a streamable video
                         async def upload_progress(cur, tot):
                             nonlocal last_upload_update
@@ -162,8 +183,8 @@ def register_ytdl_handlers(app: Client):
                             last_upload_update = now
                             frac = cur / tot * 100 if tot else 0
                             bar = get_progress_bar(frac)
-                            await updater(f"**Uploading**:\n`{fname}`\n"
-                                          f"{bar} {frac:.1f}%\n"
+                            await updater.queue.put(f"**Uploading**:\n`{fname}`\n"
+                                          f"{bar} **{frac:.1f}%**\n"
                                           f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
                             if ACTIVE_TASKS.get(tid, {}).get("cancel"):
                                 raise DownloadCancelled()
@@ -180,7 +201,8 @@ def register_ytdl_handlers(app: Client):
                         if len(part_name) > 150:
                             ext = os.path.splitext(part_name)[1]
                             part_name = part_name[:150] + ext
-
+                        
+                        last_upload_update = 0
                         async def upload_progress(cur, tot):
                             nonlocal last_upload_update
                             now = time.time()
@@ -189,22 +211,23 @@ def register_ytdl_handlers(app: Client):
                             last_upload_update = now
                             frac = cur / tot * 100 if tot else 0
                             bar = get_progress_bar(frac)
-                            await updater(f"**Uploading part {idx}/{total_parts}**:\n"
+                            await updater.queue.put(f"**Uploading part {idx}/{total_parts}**:\n"
                                           f"`{part_name}`\n"
-                                          f"{bar} {frac:.1f}%\n"
+                                          f"{bar} **{frac:.1f}%**\n"
                                           f"**Size:** {humanbytes(cur)} / {humanbytes(tot)}")
                             if ACTIVE_TASKS.get(tid, {}).get("cancel"):
                                 raise DownloadCancelled()
 
                         await app.send_document(q.message.chat.id, fpath, caption=f"✅ Uploaded part {idx}/{total_parts}: `{part_name}`", progress=upload_progress)
 
-                await updater("✅ All parts uploaded successfully!")
+                await updater.queue.put("✅ All parts uploaded successfully!")
 
             except DownloadCancelled:
-                await st.edit("❌ Download/Upload cancelled.")
+                await updater.queue.put("❌ Download/Upload cancelled.")
             except Exception as e:
-                await st.edit(f"❌ Error: {e}")
+                await updater.queue.put(f"❌ Error: {e}")
             finally:
+                updater.stop()
                 ACTIVE_TASKS.pop(tid, None)
                 # Cleanup: remove all files after a successful or failed task
                 for fpath in fpaths:
