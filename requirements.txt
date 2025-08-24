@@ -4,4 +4,7 @@ yt-dlp
 dnspython
 tgcrypto
 requests
+pyrogram
+bs4
 gdown
+aiohttp
