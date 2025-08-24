@@ -4,3 +4,4 @@ yt-dlp
 dnspython
 tgcrypto
 requests
+gdown
