@@ -16,3 +16,4 @@ tzdata
 pytz
 Pillow
 playwright
+ffmpeg
