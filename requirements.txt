@@ -1,11 +1,11 @@
-#pyrogram
+pyrogram
 pymongo
 dnspython
 tgcrypto
 bs4
 gdown
 aiohttp
-pyrogram==2.0.100
+#pyrogram==2.0.100
 aiohttp
 beautifulsoup4
 yt-dlp
@@ -15,4 +15,4 @@ psutil
 tzdata
 pytz
 Pillow
-
+playwright
