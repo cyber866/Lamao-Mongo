@@ -29,21 +29,15 @@ flask_app = Flask(__name__)
 def index():
     return "✅ Mongo Leech Bot is running!"
 
+# Optional ping endpoint
+@flask_app.route("/ping")
+def ping():
+    return jsonify({"status": "ok", "message": "🏓 Pong! Service is online."})
+
 def run_flask():
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 # ----------------------------------------------------
-# Optional ping endpoint
-@app.route("/ping")
-def ping():
-    return jsonify({"status": "ok", "message": "🏓 Pong! Service is online."})
-
-if __name__ == "__main__":
-    ts_ip, public_ip = start_tailscale()
-    try:
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-    finally:
-        cleanup_tailscale(ts_ip, public_ip)
 
 
 app = Client(
