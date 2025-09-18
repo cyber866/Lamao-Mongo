@@ -1,7 +1,7 @@
 import os
 import logging
 import threading
-from flask import Flask
+from flask import Flask , jsonify
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -32,7 +32,7 @@ def index():
 # Optional ping endpoint
 @flask_app.route("/ping")
 def ping():
-    return jsonify({"status": "ok", "message": "🏓 Pong! Service is online."})
+    return jsonify({"status": "ok", "message": "✅ Pong! Service is online , Made By Surya...!!!!"})
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
